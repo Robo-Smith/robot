@@ -25,6 +25,12 @@
  Notes to add in code:
   PIN A7 Voltage divider                empty
   PWM Pins 3, 5, 6, 9, 10, 11
+
+  alternative for mecanum
+     PIN A0/D14 PWM LF		              (wired)
+     PIN A1/D15 PWM RF		              (wired)
+     PIN A2/D16 PWM RR		              (wired)
+     PIN A3/D17 PWM LR		              (wired)
 --------------------------------------------------------*/
 
 #include <Servo.h>
@@ -33,7 +39,7 @@
 
 byte deviceAddress = 0x10;  // The address of the TF-Luna device is 0x10
 #define PIN 10              //Neopixel is attached to  
-#define NUMPIXELS   3       // number of neopixels in strip  
+#define NUMPIXELS   4       // number of neopixels in strip  
 Adafruit_NeoPixel pixels(NUMPIXELS, PIN, NEO_GRB + NEO_KHZ800);
 int delayval = 100;         // timing delay in milliseconds pause between pixels 
 unsigned int distance = 0;  // TF-Luna signal
@@ -52,9 +58,13 @@ int rightY=127;
 const int leftPwmPin = 14;  // PWM output for left joystick is 14 on yardbot - test board is 6
 const int rightPwmPin = 15; // PWM output for right joystick is 15 on yardbot - test board is 6
 const int dumpPwmPin = 16;  // PWM output for dumping is 16 on yardbot - test board is 6
+const int LR = 17; 
+
 Servo leftPWM;   // create servo object to control a servo
 Servo rightPWM;  // create servo object to control a servo
 Servo dumpPWM;   // create servo object to control a servo
+Servo LR;   // create servo object to control a servo
+
 
 void setup() {
   pixels.begin();               //INITIALIZE NeoPixel strip object (REQUIRED)
@@ -66,7 +76,8 @@ void setup() {
   pixels.setPixelColor(0, pixels.Color(0, 50, 0)); //GRB
   pixels.setPixelColor(1, pixels.Color(0, 50, 0)); //GRB
   pixels.setPixelColor(2, pixels.Color(0, 50, 0)); //GRB
-}
+  pixels.setPixelColor(3, pixels.Color(50, 0, 0)); //GRB
+  }
 
 void loop() {
   Wire.beginTransmission(deviceAddress);  //The I2C data transmission starts
