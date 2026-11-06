@@ -84,3 +84,238 @@ raspi-info
    * cd robot
    * python3 Pi.py
 
+
+## Controller modes (Pi.py + Arduino-Nano/Arduino-Nano.ino)
+
+Upload the updated Nano sketch and update the Pi files together: the new protocol
+is `Cleft,right,dump\n`, with signed values from -1000 to 1000. The Pi sends a
+complete frame every 50 ms. The Nano stops **all three motors** after 500 ms
+without a valid frame. Neutral is 90 for every motor controller.
+
+| Button | Mode | Drive | Dump |
+| --- | --- | --- | --- |
+| A | Manual (also startup/reconnect default) | Left/right stick Y independently | Triggers |
+| X | Stop | Disabled | Disabled |
+| B | Single stick | Both sticks' X and Y summed, clamped, then differential mixed | Triggers |
+| Y | Follow | Camera person detection | Disabled |
+
+Single-stick forward = clamp(left forward + right forward); turn = clamp(left X +
+right X). Left = clamp(forward + turn), right = clamp(forward - turn). Opposing
+sticks cancel; either stick can take over seamlessly. An 8% center deadband is
+applied. Existing Stadia mappings are retained: left X/Y = ABS_X/ABS_Y, right X/Y
+= ABS_Z/ABS_RZ, lower/raise = ABS_BRAKE/ABS_GAS. Simultaneous triggers subtract.
+Selecting a mode sends neutral immediately; manual/single then use current stick
+and trigger positions on the next control tick. Center the controls before switching.
+
+### Check the Pi when it is available
+
+Run these on the Pi and save their output:
+
+```sh
+cat /etc/os-release
+uname -m
+cat /proc/device-tree/model
+rpicam-hello --list-cameras
+```
+
+On older systems, use `libcamera-hello --list-cameras` if `rpicam-hello` is absent.
+The camera list identifies the attached sensor. The camera itself may also have
+its model printed on the board. The follow implementation uses Picamera2 (the
+modern libcamera stack), not legacy Picamera. See the
+[Raspberry Pi camera documentation](https://www.raspberrypi.com/documentation/accessories/camera-software.html)
+and [Picamera2 support requirements](https://github.com/raspberrypi/picamera2).
+
+On a compatible Raspberry Pi OS installation:
+
+```sh
+sudo apt update
+sudo apt install python3-evdev python3-serial python3-picamera2 python3-opencv
+```
+
+Use `/usr/bin/python3` as in robot.service so the OS camera packages are visible.
+No display is needed. Detection uses MobileNet-SSD through OpenCV DNN;
+run `/usr/bin/python3 download_person_model.py` once to download its model files.
+Only the VOC person class at confidence >= 0.70 is accepted. Camera initialization happens on the first Y press. Camera errors leave
+follow mode stopped; restart Pi.py after correcting them.
+
+### Following distance and initial checks
+
+Following uses the largest person detection in each frame, not identity tracking.
+It can change targets when multiple people appear. No detection or a result older
+than 0.5 seconds commands zero drive; there is no search motion or automatic
+reverse. Detection runs separately from the controller loop. Slow camera processing
+may therefore keep the robot stopped until resolution/detection performance is tuned.
+
+Image height is an **approximation of spacing**, not a measurement in meters.
+In `robot_control.py`, tune `FOLLOW_TARGET_SIZE` (default 0.65) to the fraction of
+the image occupied vertically by a person at the desired distance. Larger values
+allow closer following. The 0.04 margin stops slightly before that target.
+`FOLLOW_MAX_SPEED` and `FOLLOW_MAX_TURN` default to 0.25 and 0.20 of full output;
+combined wheel output can reach 0.45. The existing TF-Luna thresholds remain:
+stop forward motion below 20 cm, halve it through 100 cm when signal is valid.
+It is an obstacle safeguard, not the source of person distance.
+
+First verify with drive wheels lifted: startup neutral, manual directions,
+each single stick, combined sticks, trigger directions, X stopping all motors,
+and the Nano stopping when the Pi process is terminated or USB is disconnected.
+Then test Y in a clear space at low speed with X readily available, checking
+turn direction, person loss, close-person stopping, and spacing calibration.
+Hardware/camera performance must be checked on the robot before unattended use.
+
+Local logic checks: `python3 -m unittest discover -s tests`.
+
+### Bring up the controller modes without a camera
+
+Manual, stop and single-stick do not require OpenCV, Picamera2, or a connected
+camera. Camera packages are imported only after Y is pressed. With no camera,
+Y leaves drive and dump stopped; A or B returns to controller operation.
+
+1. Stop the running service before uploading/testing: `sudo systemctl stop robot.service`.
+2. Install controller dependencies: `sudo apt install python3-evdev python3-serial`.
+3. Upload `Arduino-Nano/Arduino-Nano.ino` using the Arduino IDE (Nano board;
+   Servo and Adafruit NeoPixel libraries; current Arduino AVR Boards core for
+   `Wire.setWireTimeout`). Keep the service stopped until both sides are updated.
+4. From the updated repository run `/usr/bin/python3 Pi.py`. Keep `Pi.py`,
+   `robot_control.py`, and `person_follower.py` in the same directory.
+5. With wheels lifted, check independent drives and triggers in manual, both
+   sticks and triggers in B, X while all controls are held, then A to resume.
+   Hold a drive input steady for several seconds to verify the heartbeat keeps
+   it running. Ctrl+C must stop everything; the Nano watchdog is the fallback
+   if the Pi stops sending commands.
+6. When these checks pass, use `sudo systemctl start robot.service` and inspect
+   `tail -f /home/rs/robot.log`. Do not run the service and a terminal copy at
+   the same time, because they would compete for the controller/serial port.
+
+If connection fails, check `ls -l /dev/ttyUSB* /dev/ttyACM*` for the Nano's port
+and `python3 -m evdev.evtest` for controller detection. Update `SERIAL_PORT` in
+`Pi.py` if the Nano is not `/dev/ttyUSB0`.
+
+### Inspect missed person detections
+
+Stop robot.service and any terminal Pi.py first, then run:
+
+```sh
+/usr/bin/python3 person_follower.py
+```
+
+This camera-only diagnostic sends no motor commands. It saves ten frames, about
+one second apart, to `/tmp/yardbot-follow-debug/frame-00.jpg` through
+`frame-09.jpg`, with green boxes and detector scores for detected people. Inspect
+these images to check orientation, lighting, and whether head and feet are visible.
+The follow camera now requests the IMX219's 1640x1232 sensor mode and downscales
+to 640x480, avoiding its cropped native VGA mode. See the
+[Picamera2 manual](https://datasheets.raspberrypi.com/camera/picamera2-manual.pdf)
+for how raw stream size selects the sensor mode. Detector processing remains at
+640x480; lost-person stopping and speed limits are unchanged.
+
+
+### MobileNet-SSD person detector (replaces HOG)
+
+The earlier HOG detector produced background false positives in this setup.
+Both camera diagnostics and follow mode now use the same MobileNet-SSD detector,
+filtering for the VOC person class at 70% confidence with duplicate suppression.
+This is a candidate improvement, not a guarantee against false positives.
+
+Update `person_follower.py`, `person_detector.py`, and `download_person_model.py`
+on the Pi, stop robot.service/any running Pi.py, then run:
+
+```sh
+cd ~/robot
+/usr/bin/python3 download_person_model.py
+/usr/bin/python3 person_follower.py
+```
+
+The downloader fetches about 23 MB into `models/` beside the scripts from the
+[upstream MobileNet-SSD project](https://github.com/chuanqi305/MobileNet-SSD).
+Internet is needed only for this explicit setup step. The model is not bundled
+in git. Manual, stop, and single-stick modes do not load it. Missing models stop
+follow mode with setup instructions. Existing OpenCV packages provide the DNN
+backend; TensorFlow, PyTorch, and pip installs are not required.
+
+Inspect the saved images for boxes on the actual person and check empty scenes,
+including the background light. Counts alone do not establish correct detection.
+Images are overwritten by each diagnostic run. Report inference times too: the
+500 ms freshness limit still stops follow output if processing takes too long.
+The model's preprocessing and class ordering follow the upstream demo. If results
+are correct, retry Pi.py with wheels lifted before checking movement on the ground.
+
+Controller queue overflow (`SYN_DROPPED`) now stops all motors, discards events
+through the next synchronization report, and rereads current axes without
+reopening serial/resetting the Nano. It stays in stop mode until a fresh A/B/Y
+press; center the controls first. This follows the Linux evdev recovery protocol.
+
+With the default follow settings, a detected height >= 0.61 of image height
+commands zero output (0.65 target minus 0.04 margin). Stand farther back so the
+logged height is about 0.40–0.50 for an initial wheels-lifted movement check.
+At height 0.59, output is only about 0.04, possibly below the motor deadband;
+a nonzero logged request does not prove that the motors physically move.
+
+### One-meter spacing and motor deadband
+
+Follow mode now floors each nonzero wheel request to 12% to clear the observed
+~10% motor deadband. Zero remains zero; person-loss and close-person stopping
+remain immediate. Existing maximum commands are unchanged. This compensation
+only applies to follow mode. It can make motion near the stopping boundary more
+abrupt; check behavior with wheels lifted before a ground test.
+
+To set approximate one-meter spacing, update `robot_control.py` and
+`person_follower.py`, stop robot.service and any running Pi.py, then run:
+
+```sh
+cd ~/robot
+/usr/bin/python3 person_follower.py --calibrate-1m
+```
+
+During the five-second countdown, stand one meter from the camera, centered and
+alone, with head and feet visible. Stay still through the ten samples. Calibration
+uses the median height of frames containing exactly one person. It requires at
+least five such frames and rejects inconsistent or nearly full-image heights.
+Inspect the annotated images to confirm that the boxes cover the person.
+It writes `follow_settings.json` beside the scripts; restart Pi.py to load it.
+The calibration offsets the existing stop margin so your measured image size
+corresponds to the stop point. Change camera angle/height or the person and this
+approximation can change; it is not a measured metric range. To undo calibration,
+rename that settings file and restart Pi.py. Recalibrate after changing the camera.
+
+
+### One-meter calibration when head or feet are outside the image
+
+New `--calibrate-1m` runs use detected person **box width**, not height. Top and
+bottom cropping is allowed; keep the full width of the person visible, face the
+camera, arms at your sides, and stand still one meter from the camera. Side-clipped
+boxes and frames with multiple detections are excluded. At least five stable
+single-person samples are needed. Run the same calibration command again after
+updating `robot_control.py` and `person_follower.py`, then restart Pi.py.
+
+The saved file records `metric: width`; existing height calibrations continue to
+load until replaced. A failed calibration leaves any existing settings untouched.
+This supersedes the earlier full-body requirement for one-meter calibration.
+Turning sideways or moving arms changes apparent width, so it remains approximate
+spacing for a person facing the camera. Check boxes in the saved images before
+using the calibration. No motor commands are sent by calibration.
+
+
+### Follow speed tuning
+
+Follow mode now uses relative error from the calibrated person size instead of
+raw image-size difference. Defaults in `robot_control.py` are `FOLLOW_MAX_SPEED =
+0.65`, `FOLLOW_SPEED_GAIN = 0.80`, `FOLLOW_MIN_WHEEL_SPEED = 0.18`, and
+`FOLLOW_MAX_WHEEL_SPEED = 0.65`. Every wheel is capped at 65%, including during
+steering. For a centered person, a width 25% smaller than the calibrated width
+requests about 38% drive; half the calibrated width requests 58%. It slows toward
+the 18% minimum near the target and stops at the calibrated size. These replace
+the earlier 25% forward limit and raw-size gain. Existing calibration files remain
+valid. TF-Luna can still halve forward output within its 100 cm caution zone.
+Update `robot_control.py` and restart Pi.py to apply; no firmware upload or
+recalibration is needed. First test the changed response with wheels lifted.
+
+
+### Stronger low-speed follow turns
+
+Steering outside the existing center deadband now starts at a 30% differential
+command and rises to 40% (`FOLLOW_MIN_TURN`, `FOLLOW_MAX_TURN`). During turns,
+each nonzero wheel command has a 28% floor (`FOLLOW_MIN_TURN_WHEEL_SPEED`).
+This gives more power to slow turns/pivots and can reverse the inside wheel.
+Straight driving retains its 18% minimum; every wheel is still capped at 65%.
+Close-person, missing-person and stale-result stops still command zero. Update
+`robot_control.py` and restart Pi.py; calibration and firmware do not change.

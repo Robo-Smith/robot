@@ -1,0 +1,7 @@
+
+# Downloaded person-detection model and Python cache
+models/
+__pycache__/
+
+# Per-robot camera spacing calibration
+follow_settings.json

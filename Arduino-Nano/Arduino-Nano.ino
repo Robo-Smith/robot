@@ -48,22 +48,25 @@ int counter=0;            // counts connected arduino and stadia devices
 int alivecount=0;
 int range_stop=20;
 int range_close=100;
-int oldl=127;
-int filtl=127;
-int oldr=127;
-int filtr=127;
-int leftY=127;
-int rightY=127;
+// Signed commands: positive drive is forward; positive dump raises the bed.
+int leftDriveCommand = 0;
+int rightDriveCommand = 0;
+int dumpCommand = 0;
+unsigned long lastCommandMs = 0;
+const unsigned long commandTimeoutMs = 500;
+char commandBuffer[48];
+byte commandLength = 0;
+bool commandOverflow = false;
 
 const int leftPwmPin = 14;  // PWM output for left joystick is 14 on yardbot - test board is 6
 const int rightPwmPin = 15; // PWM output for right joystick is 15 on yardbot - test board is 6
 const int dumpPwmPin = 16;  // PWM output for dumping is 16 on yardbot - test board is 6
-const int LR = 17; 
+const int spareMotorPin = 17;
 
 Servo leftPWM;   // create servo object to control a servo
 Servo rightPWM;  // create servo object to control a servo
 Servo dumpPWM;   // create servo object to control a servo
-Servo LR;   // create servo object to control a servo
+// Pin 17 is reserved; no fourth motor is attached.
 
 
 void setup() {
@@ -73,6 +76,10 @@ void setup() {
   leftPWM.attach(leftPwmPin);   //Attaches the servo on pin to the servo object
   rightPWM.attach(rightPwmPin); //Attaches the servo on pin to the servo object
   dumpPWM.attach(dumpPwmPin);   //Attaches the servo on pin to the servo object
+  leftPWM.write(90);
+  rightPWM.write(90);
+  dumpPWM.write(90);
+  Wire.setWireTimeout(25000, true); // Bound a stalled I2C transaction (AVR Wire).
   pixels.setPixelColor(0, pixels.Color(0, 50, 0)); //GRB
   pixels.setPixelColor(1, pixels.Color(0, 50, 0)); //GRB
   pixels.setPixelColor(2, pixels.Color(0, 50, 0)); //GRB
@@ -94,68 +101,49 @@ void loop() {
     distance = (data[1] << 8) | data[0]; //Distance Value
     signalStrength = (data[3] << 8) | data[2]; //Signal Strength Signal Dist value is unreliable when Amp < 100 or Amp = 65535 (Overexposure) 
   }
-  if (Serial.available()) {
-    String input = Serial.readStringUntil('\n');
-    if (input.startsWith("L")) { //Left Joystick Input
-      leftY = input.substring(1).toInt();
-      pixels.setPixelColor(1, pixels.Color(0, 0, 100)); //GRB
-      alivecount=0;
-    } 
-    else if (input.startsWith("R")) { //Right Joystick Input
-      rightY = input.substring(1).toInt();
-      pixels.setPixelColor(0, pixels.Color(0, 0, 100)); //GRB using Blue to indicate controller input
-      alivecount=0;
-    }
-    else if (input.startsWith("D")) { //Right Trigger Input
-      int lower_dump = input.substring(1).toInt();
-      int DumpPwmValue = map(lower_dump, 0, 255, 90, 15); // Map joystick value to PWM range 90-0 full range
-      dumpPWM.write(DumpPwmValue);
-      pixels.setPixelColor(2, pixels.Color(0, 0, 100)); //GRB using Blue to indicate controller input
-      alivecount=0;
-    }
-    else if (input.startsWith("U")) { //Left Trigger Input
-      int raise_dump = input.substring(1).toInt();
-      int RaisePwmValue = map(raise_dump, 0, 255, 90, 165); // Map joystick value to PWM range 90-180 full range
-      dumpPWM.write(RaisePwmValue);
-      pixels.setPixelColor(2, pixels.Color(0, 0, 100)); //GRB using Blue to indicate controller input
-      alivecount=0;
+  // Nonblocking parser: accept only complete, validated command frames.
+  while (Serial.available()) {
+    char ch = Serial.read();
+    if (ch == '\n') {
+      commandBuffer[commandLength] = '\0';
+      int left, right, dump;
+      char extra;
+      if (!commandOverflow && sscanf(commandBuffer, "C%d,%d,%d%c", &left, &right, &dump, &extra) == 3
+          && left >= -1000 && left <= 1000 && right >= -1000 && right <= 1000
+          && dump >= -1000 && dump <= 1000) {
+        leftDriveCommand = left;
+        rightDriveCommand = right;
+        dumpCommand = dump;
+        lastCommandMs = millis();
+        alivecount = 0;
+      }
+      commandLength = 0;
+      commandOverflow = false;
+    } else if (commandLength < sizeof(commandBuffer) - 1) {
+      commandBuffer[commandLength++] = ch;
+    } else {
+      commandOverflow = true;
     }
   }
- //Drive_Out-----------------------------------------------------------------------
-  //Stop
-  if ((distance<range_stop)&&(signalStrength>150)&&(signalStrength<55000)){
-    if (leftY<127){
-      filtl = 127;
-    }
-    if (rightY<127){
-      filtr = 127;
+  if (millis() - lastCommandMs >= commandTimeoutMs) {
+    leftDriveCommand = rightDriveCommand = dumpCommand = 0;
+  }
+  int leftOutput = leftDriveCommand;
+  int rightOutput = rightDriveCommand;
+  // Keep the existing TF-Luna forward stop/slow thresholds. Reverse remains available.
+  if (signalStrength > 150 && signalStrength < 55000) {
+    if (distance < range_stop) {
+      leftOutput = min(leftOutput, 0);
+      rightOutput = min(rightOutput, 0);
+    } else if (distance <= range_close) {
+      if (leftOutput > 0) leftOutput /= 2;
+      if (rightOutput > 0) rightOutput /= 2;
     }
   }
-  //Slow
-  else if ((distance<=range_close)&&(signalStrength>150)&&(signalStrength<55000)){
-    if (leftY<127){
-      filtl = 127-((127-leftY)*.5);
-    }
-    if (rightY<127){
-      filtr = 127-((127-rightY)*.5);
-    }
-  }
-  //Go filtered
-  else {
-    if ((leftY<127)&&(oldl<leftY)){
-      filtl = 127-((127-leftY)*((127-leftY)/(127-oldl)));
-      oldl=leftY;
-    }
-    if ((rightY<127)&&(oldr<rightY)){
-      filtr = 127-((127-rightY)*((127-rightY)/(127-oldr)));
-      oldr=rightY;
-    }
-  }
-  //Write drive out
-    int leftPwmValue = map(filtl, 0, 255, 175, 5); // Map joystick value to PWM range 180-0 full range
-    leftPWM.write(leftPwmValue);
-    int rightPwmValue = map(filtl, 0, 255, 5, 175); // Map joystick value to PWM range 180-0 full range
-    rightPWM.write(rightPwmValue);
+  // Preserve the opposing motor-controller orientations and neutral at 90.
+  leftPWM.write(90 + leftOutput * 85L / 1000);
+  rightPWM.write(90 - rightOutput * 85L / 1000);
+  dumpPWM.write(90 + dumpCommand * 75L / 1000);
   //lights
   if ((distance<=range_stop)&&(signalStrength>150)&&(signalStrength<55000)){ //Too Close - Stop
     pixels.setPixelColor(2, pixels.Color(0, 200, 0));  //green, red, blue

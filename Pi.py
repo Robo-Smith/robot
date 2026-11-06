@@ -1,77 +1,123 @@
-"""
-Python Program for Raspberry Pi to Interface a Google Stadia Controller via Bluetooth and Send Joystick Y-axis Values to an Arduino Nano via USB Serial
+"""Stadia mode control and 20 Hz motor command heartbeat to the Nano."""
+import select
+import signal
+import time
 
-Original Prompt:
-Write a Python program that when run on a Raspberry Pi will take a Google Stadia remote control connected by Bluetooth and take the joystick Y-motion for each of the left and right sticks and sends them through USB serial connection to an Arduino Nano.
-Steps to Run the Program:
-1. Install Required Packages:
-   $ sudo apt install python3-evdev python3-serial
-2. Pair the Stadia controller with your Raspberry Pi using the Bluetooth settings.
-3. Plug the Arduino Nano into the Raspberry Pi via USB and note the serial port (e.g., /dev/ttyUSB0).
-4. Save the script as 'stadia_to_arduino.py' and run it:
-   $ python3 stadia_to_arduino.py
-"""
-import evdev  #Read/Write events https://python-evdev.readthedocs.io/en/latest/
-import serial #Encapsulates access to serial ports https://pyserial.readthedocs.io/en/latest/pyserial.html
-import time   #Time related functions https://docs.python.org/3/library/time.html#
+import evdev
+import serial
 
-SERIAL_PORT = '/dev/ttyUSB0'  # Adjust to match your Arduino Nano's port
-BAUD_RATE = 115200 #Match with Arduino serial BAUD rate
-devcount = 0 #Counter for number of devices connected, Stadia and Arduino
+from person_follower import PersonFollower
+from robot_control import clamp, follow_command, controller_command
 
-def find_stadia_controller(): #Find the Stadia controller device.
-    devices = [evdev.InputDevice(path) for path in evdev.list_devices()]
-    for device in devices:
-        if 'Stadia' in device.name:  # Adjust to match the exact name if needed
+SERIAL_PORT = '/dev/ttyUSB0'
+BAUD_RATE = 115200
+BUTTON_MODES = {304: 'manual', 305: 'single', 307: 'stop', 308: 'follow'}
+TICK = 0.05
+
+
+def find_stadia_controller():
+    for path in evdev.list_devices():
+        device = evdev.InputDevice(path)
+        if 'Stadia' in device.name:
             return device
-    raise RuntimeError("Stadia controller not found. Make sure it is connected via Bluetooth.")
+        device.close()
+    raise RuntimeError('Stadia controller not found')
 
-def main(devcount):
-    while devcount!=2:
-        # Connect to the Stadia controller
-        try:
-            stadia_controller = find_stadia_controller()
-            print(f"Connected to {stadia_controller.name} at {stadia_controller.path}")
-            devcount=1
-        except RuntimeError as e:
-            print(e)
-            devcount=0
-            #return #exits from a function entirely, optionally passing back a value.
 
-        # Open serial connection to Arduino
+def normalized(device, code, value, trigger=False):
+    info = device.absinfo(code)
+    span = info.max - info.min
+    if span <= 0:
+        return 0.0
+    value = (value - info.min) / span
+    if trigger:
+        return max(0.0, min(1.0, value))
+    value = clamp(value * 2 - 1)
+    return 0.0 if abs(value) < 0.08 else value
+
+
+def send(ser, left=0, right=0, dump=0):
+    # One complete frame avoids partially updated left/right/dump commands.
+    values = [round(clamp(v) * 1000) for v in (left, right, dump)]
+    ser.write(('C%d,%d,%d\n' % tuple(values)).encode('ascii'))
+
+
+def main():
+    signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
+    follower = PersonFollower()
+    while True:
+        controller = ser = None
         try:
-            ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
-            print(f"Connected to Arduino on {SERIAL_PORT}")
-            if devcount==1:
-                devcount=2
-            else:
-                devcount=1
-        except serial.SerialException as e:
-            print(f"Error connecting to serial port: {e}")
-            return
-        time.sleep(1)            
-            
-    
-        # Read joystick events and send data to Arduino
+            controller = find_stadia_controller()
+            ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=0, write_timeout=0.1)
+            time.sleep(2)  # Nano resets when the serial port opens.
+            send(ser)
+            mode = 'manual'
+            axes = {}  # Require fresh input after reconnecting.
+            resyncing = False
+            print('Connected; mode: manual', flush=True)
+            next_tick = time.monotonic()
+            while True:
+                ready, _, _ = select.select([controller], [], [], max(0, next_tick - time.monotonic()))
+                if ready:
+                    for event in controller.read():
+                        if event.type == evdev.ecodes.EV_SYN and event.code == evdev.ecodes.SYN_DROPPED:
+                            send(ser)
+                            mode = 'stop'
+                            axes.clear()
+                            follower.set_enabled(False)
+                            resyncing = True
+                            print('Controller events lost; motors stopped, resynchronizing', flush=True)
+                            continue
+                        if resyncing:
+                            # Linux evdev requires discarding through SYN_REPORT.
+                            if event.type == evdev.ecodes.EV_SYN and event.code == evdev.ecodes.SYN_REPORT:
+                                for code in (evdev.ecodes.ABS_X, evdev.ecodes.ABS_Y,
+                                             evdev.ecodes.ABS_Z, evdev.ecodes.ABS_RZ,
+                                             evdev.ecodes.ABS_BRAKE, evdev.ecodes.ABS_GAS):
+                                    info = controller.absinfo(code)
+                                    if info is not None:
+                                        axes[code] = normalized(controller, code, info.value,
+                                            code in (evdev.ecodes.ABS_BRAKE, evdev.ecodes.ABS_GAS))
+                                resyncing = False
+                                print('Controller synchronized; center controls and press A/B/Y to resume', flush=True)
+                            continue
+                        if event.type == evdev.ecodes.EV_KEY and event.value == 1 and event.code in BUTTON_MODES:
+                            mode = BUTTON_MODES[event.code]
+                            send(ser)
+                            follower.set_enabled(mode == 'follow')
+                            print(f'Mode: {mode}', flush=True)
+                        elif event.type == evdev.ecodes.EV_ABS:
+                            axes[event.code] = normalized(controller, event.code, event.value,
+                                event.code in (evdev.ecodes.ABS_BRAKE, evdev.ecodes.ABS_GAS))
+                if time.monotonic() < next_tick:
+                    continue
+                next_tick = time.monotonic() + TICK
+                get = lambda code: axes.get(code, 0.0)
+                left, right, dump = controller_command(mode,
+                    get(evdev.ecodes.ABS_X), -get(evdev.ecodes.ABS_Y),
+                    get(evdev.ecodes.ABS_Z), -get(evdev.ecodes.ABS_RZ),
+                    get(evdev.ecodes.ABS_BRAKE), get(evdev.ecodes.ABS_GAS))
+                if mode == 'follow':
+                    left, right = follow_command(*follower.detection())
+                send(ser, left, right, dump)
+        except (OSError, RuntimeError, serial.SerialException) as exc:
+            print(f'Connection error: {exc}', flush=True)
+        finally:
+            follower.set_enabled(False)
+            if ser is not None:
+                try:
+                    send(ser)
+                except (OSError, serial.SerialException):
+                    pass
+                ser.close()
+            if controller is not None:
+                controller.close()
+        time.sleep(1)
+
+
+if __name__ == '__main__':
     try:
-        for event in stadia_controller.read_loop(): #Find event codes, install "python -m evdev.evtest"
-            if event.type == evdev.ecodes.EV_ABS:   # Get joystick Axis values
-                if event.code == evdev.ecodes.ABS_Y:       # Left stick Y-axis
-                    left_y = event.value
-                    ser.write(f"L{left_y}\n".encode())
-                elif event.code == evdev.ecodes.ABS_RZ:    # Right stick Y-axis
-                    right_y = event.value
-                    ser.write(f"R{right_y}\n".encode())
-                elif event.code == evdev.ecodes.ABS_BRAKE: # Left Trigger
-                    lower_dump = event.value
-                    ser.write(f"D{lower_dump}\n".encode())
-                elif event.code == evdev.ecodes.ABS_GAS:   # Right Trigger
-                    raise_dump = event.value
-                    ser.write(f"U{raise_dump}\n".encode())
-    except KeyboardInterrupt: #[CTRL]+[C] interrupt
-        print("\nExiting program.")
-    finally:
-        ser.close()
-
-if __name__ == "__main__":
-    main(devcount)
+        main()
+    except KeyboardInterrupt:
+        print('Stopped', flush=True)

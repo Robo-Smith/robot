@@ -1,14 +1,17 @@
 [Unit]
-Description=Start Clock
+Description=YardBot controller and motor interface
 
 [Service]
 Environment=DISPLAY=:0
 Environment=XAUTHORITY=/home/rs/.Xauthority
-ExecStart=/bin/bash -c '/usr/bin/python3 /home/rs/robot/Pi.py > /home/rs/robot.log 2>&1'
+WorkingDirectory=/home/rs/robot
+ExecStart=/usr/bin/python3 -u /home/rs/robot/Pi.py
+StandardOutput=append:/home/rs/robot.log
+StandardError=inherit
 Restart=always
 RestartSec=10s
-KillMode=process
-TimeoutSec=infinity
+KillMode=control-group
+TimeoutStopSec=5s
 
 [Install]
 WantedBy=graphical.target
