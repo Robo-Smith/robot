@@ -50,15 +50,16 @@ class FollowCalibrationTests(unittest.TestCase):
             self.assertGreater(speed(250), .18)
             self.assertLess(speed(250), speed(192))
 
-    def test_slow_turns_have_more_power_and_mirror_correctly(self):
+    def test_slow_turns_use_forward_arcs_and_mirror_correctly(self):
         with patch.object(control, 'FOLLOW_SIZE_METRIC', 'width'), \
              patch.object(control, 'FOLLOW_TARGET_SIZE', .44):
             # Just outside spacing target: forward request is near its minimum.
             left, right = control.follow_command((280, 0, 250, 480), 640, 480)
             self.assertGreater(left, 0)
-            self.assertLess(right, 0)
+            self.assertGreater(right, 0)
+            self.assertGreater(left, right)
             self.assertGreaterEqual(abs(left), .28)
-            self.assertGreaterEqual(abs(right), .28)
+            self.assertGreaterEqual(abs(right), .18)
             mirror = control.follow_command((110, 0, 250, 480), 640, 480)
             self.assertAlmostEqual(mirror[0], right)
             self.assertAlmostEqual(mirror[1], left)

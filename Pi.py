@@ -7,11 +7,15 @@ import evdev
 import serial
 
 from person_follower import PersonFollower
-from robot_control import clamp, follow_command, controller_command
+from controller_actions import DpadHolds, SystemActions
+from robot_control import clamp, follow_command, controller_command, FollowRamp, follow_wheel_minimum, FollowSteering
 
 SERIAL_PORT = '/dev/ttyUSB0'
 BAUD_RATE = 115200
 BUTTON_MODES = {304: 'manual', 305: 'single', 307: 'stop', 308: 'follow'}
+DPAD_KEYS = {evdev.ecodes.BTN_DPAD_DOWN: 'down', evdev.ecodes.BTN_DPAD_UP: 'up',
+             evdev.ecodes.BTN_DPAD_LEFT: 'left', evdev.ecodes.BTN_DPAD_RIGHT: 'right'}
+DPAD_HATS = {evdev.ecodes.ABS_HAT0X: 'x', evdev.ecodes.ABS_HAT0Y: 'y'}
 TICK = 0.05
 
 
@@ -45,6 +49,7 @@ def send(ser, left=0, right=0, dump=0):
 def main():
     signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
     follower = PersonFollower()
+    system_actions = SystemActions()
     while True:
         controller = ser = None
         try:
@@ -55,6 +60,9 @@ def main():
             mode = 'manual'
             axes = {}  # Require fresh input after reconnecting.
             resyncing = False
+            holds = DpadHolds()
+            follow_ramp = FollowRamp()
+            follow_steering = FollowSteering()
             print('Connected; mode: manual', flush=True)
             next_tick = time.monotonic()
             while True:
@@ -64,7 +72,10 @@ def main():
                         if event.type == evdev.ecodes.EV_SYN and event.code == evdev.ecodes.SYN_DROPPED:
                             send(ser)
                             mode = 'stop'
+                            follow_ramp.reset()
+                            follow_steering.reset()
                             axes.clear()
+                            holds.reset(require_release=True)
                             follower.set_enabled(False)
                             resyncing = True
                             print('Controller events lost; motors stopped, resynchronizing', flush=True)
@@ -82,8 +93,18 @@ def main():
                                 resyncing = False
                                 print('Controller synchronized; center controls and press A/B/Y to resume', flush=True)
                             continue
+                        if event.type == evdev.ecodes.EV_ABS and event.code in DPAD_HATS:
+                            holds.update('hat', DPAD_HATS[event.code], event.value, time.monotonic())
+                            continue
+                        if event.type == evdev.ecodes.EV_KEY and event.code in DPAD_KEYS:
+                            holds.update('key', DPAD_KEYS[event.code], event.value, time.monotonic())
+                            continue
+                        if system_actions.shutdown_pending.is_set():
+                            continue
                         if event.type == evdev.ecodes.EV_KEY and event.value == 1 and event.code in BUTTON_MODES:
                             mode = BUTTON_MODES[event.code]
+                            follow_ramp.reset()
+                            follow_steering.reset()
                             send(ser)
                             follower.set_enabled(mode == 'follow')
                             print(f'Mode: {mode}', flush=True)
@@ -93,13 +114,29 @@ def main():
                 if time.monotonic() < next_tick:
                     continue
                 next_tick = time.monotonic() + TICK
+                action = holds.poll(time.monotonic())
+                if action and not system_actions.shutdown_pending.is_set():
+                    if action == 'shutdown':
+                        send(ser)
+                        mode = 'stop'
+                        follower.set_enabled(False)
+                    system_actions.submit(action)
+                if system_actions.shutdown_pending.is_set():
+                    mode = 'stop'
+                    follower.set_enabled(False)
                 get = lambda code: axes.get(code, 0.0)
                 left, right, dump = controller_command(mode,
                     get(evdev.ecodes.ABS_X), -get(evdev.ecodes.ABS_Y),
                     get(evdev.ecodes.ABS_Z), -get(evdev.ecodes.ABS_RZ),
                     get(evdev.ecodes.ABS_BRAKE), get(evdev.ecodes.ABS_GAS))
                 if mode == 'follow':
-                    left, right = follow_command(*follower.detection())
+                    box, width, height = follower.detection()
+                    left, right = follow_command(box, width, height, follow_steering)
+                    left, right = follow_ramp.update(left, right, time.monotonic(),
+                                                    follow_wheel_minimum(box, width, follow_steering))
+                else:
+                    follow_ramp.reset()
+                    follow_steering.reset()
                 send(ser, left, right, dump)
         except (OSError, RuntimeError, serial.SerialException) as exc:
             print(f'Connection error: {exc}', flush=True)

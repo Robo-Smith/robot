@@ -319,3 +319,91 @@ This gives more power to slow turns/pivots and can reverse the inside wheel.
 Straight driving retains its 18% minimum; every wheel is still capped at 65%.
 Close-person, missing-person and stale-result stops still command zero. Update
 `robot_control.py` and restart Pi.py; calibration and firmware do not change.
+
+## D-pad system controls
+
+In any drive mode, hold exactly one direction continuously for three seconds:
+
+| Direction | Action |
+| --- | --- |
+| Down | Stop all motors and request Pi shutdown |
+| Right | Toggle the Wi-Fi radio off/on according to its current state |
+| Left | Log a hotspot request (placeholder; no network changes yet) |
+
+Short holds and diagonals cancel. Each action fires once per hold; release and
+hold again to repeat. Wi-Fi toggling leaves Bluetooth available for controller
+input, but turning Wi-Fi off disconnects Wi-Fi SSH/VNC sessions. Hold right again
+to enable the radio; reconnection depends on the existing network profiles.
+Shutdown locks out drive-mode selection while the OS request is pending. If the
+request fails, motors stay stopped and a fresh mode selection can resume control.
+System commands run in a background worker, keeping the controller loop and motor
+heartbeat responsive. Errors are printed to the normal robot log. Lost controller
+events cancel holds and require a release/fresh hold before another system action.
+
+Update `Pi.py` and add `controller_actions.py` beside it, then restart robot.service.
+The existing service runs as root and can execute system commands. Ordinary
+terminal runs may lack permission; failures are logged without prompting for a
+password. No sudoers changes are needed for service operation. Right requires
+NetworkManager/nmcli; check its availability without changing network state:
+
+```sh
+command -v nmcli
+nmcli -t -f WIFI radio
+```
+
+Wi-Fi commands follow the
+[NetworkManager nmcli documentation](https://networkmanager.pages.freedesktop.org/NetworkManager/NetworkManager/nmcli.html).
+Shutdown uses `systemctl --no-ask-password poweroff`, following the
+[systemd documentation](https://freedesktop.org/software/systemd/man/latest/systemctl.html).
+Neither Wi-Fi changes nor shutdown commands are executed by the automated tests;
+hold timing, command dispatch, and failure handling are tested with mocks.
+
+## Follow-mode wheel ramps
+
+`Pi.py` now applies an independent time-based ramp to each follow-mode wheel
+command after person detection and steering mixing. Acceleration above the usable
+motor minimum is 30 percentage points/second (`FOLLOW_ACCELERATION = 0.30`),
+normal deceleration is 60 points/second (`FOLLOW_DECELERATION = 0.60`). Reversing
+a wheel first decelerates it to zero, keeps zero for that update, then starts
+in the opposite direction. At startup it steps to 18% for straight driving or
+28% during turns; commands below those minima are skipped because they do not
+reliably move this robot. Switching into turning can therefore still create a
+small step when the usable minimum increases. Wheel commands remain capped at 65%.
+
+Both-zero follow requests (person loss, stale camera results, close-person stop)
+reset the ramp and command zero immediately. X, mode changes, controller recovery,
+shutdown, and reconnecting also reset/bypass it. The Nano's TF-Luna obstacle stop
+and serial timeout remain independent of this Pi-side ramp. A control-loop pause
+of at least 500 ms resets ramp history to avoid resuming at a previous high speed.
+Manual and single-stick inputs are not ramped. Camera-position/box smoothing has
+not been added at this stage.
+
+Copy updated `Pi.py` and `robot_control.py` to the Pi and restart robot.service.
+No firmware update or recalibration is required. Check forward speed changes,
+low-speed turns, reversal, X, and person loss with wheels lifted before driving.
+Follow log lines show the requested detection-based outputs **before** the ramp;
+the serial commands sent to the Nano contain the ramped outputs.
+
+## Follow steering stability
+
+Ordinary tracking now uses forward arcs instead of reversing the inside wheel
+for small corrections. The outside wheel has a 28% target minimum during a turn;
+the inside wheel stays forward with an 18% minimum. Pivots remain available for
+large horizontal offsets (normalized error >= 0.70), retaining 30–40% differential
+power. Stateful pivot handling returns to arcs below 0.50 error.
+
+Corrections begin outside normalized error 0.18 and release inside 0.08. Between
+those thresholds the existing correction is retained, reducing chatter. An error
+of 0.18 means the person center is 9% of the full image width from image center.
+No temporal camera filter is added, avoiding extra delay while approaching center.
+When the requested turn centers or changes direction, the ramp promptly removes
+the old wheel difference by lowering the faster wheel to the slower forward
+wheel, or stopping opposed wheels. It then ramps toward the new request. This
+steering-release behavior supersedes a strict independent wheel deceleration
+limit for obsolete turn commands. Safety stops still bypass all ramps.
+
+Update `robot_control.py` and `Pi.py`, then restart robot.service. Existing spacing
+calibration is retained. Detection-worker logs remain stateless requested outputs;
+the control loop also applies steering hysteresis and the motor ramp before
+sending commands. Check center tracking and large turns with wheels lifted, then
+check for oscillation on the ground; hardware dynamics are not simulated by tests.

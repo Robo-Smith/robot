@@ -41,3 +41,44 @@ class RecoveryTests(unittest.TestCase):
         self.assertTrue(all(call.args == (b'C0,0,0\n',) for call in serial.write.call_args_list))
         self.assertTrue(all(call.args == (False,) for call in follower.set_enabled.call_args_list))
         serial.close.assert_called_once()
+
+    def test_shutdown_hold_stops_before_dispatch_and_ignores_mode_buttons(self):
+        import threading
+        codes = Pi.evdev.ecodes
+        controller = Mock()
+        controller.read.side_effect = [
+            iter([event(codes.EV_ABS, codes.ABS_HAT0Y, 1)]),
+            iter([event(codes.EV_KEY, 308, 1)]),
+        ]
+        ser = Mock()
+        follower = Mock()
+        actions = Mock()
+        actions.shutdown_pending = threading.Event()
+        def submit(action):
+            self.assertEqual(action, 'shutdown')
+            self.assertEqual(ser.write.call_args.args, (b'C0,0,0\n',))
+            follower.set_enabled.assert_called_with(False)
+            actions.shutdown_pending.set()
+            return True
+        actions.submit.side_effect = submit
+        now = [0.0]
+        steps = iter([(0, [controller]), (3.1, []), (3.2, [controller])])
+        def select(*args):
+            try:
+                now[0], ready = next(steps)
+            except StopIteration:
+                raise KeyboardInterrupt
+            return ready, [], []
+        with patch.object(Pi, 'find_stadia_controller', return_value=controller), \
+             patch.object(Pi.serial, 'Serial', return_value=ser), \
+             patch.object(Pi, 'PersonFollower', return_value=follower), \
+             patch.object(Pi, 'SystemActions', return_value=actions), \
+             patch.object(Pi.signal, 'signal'), patch.object(Pi.time, 'sleep'), \
+             patch.object(Pi.time, 'monotonic', side_effect=lambda: now[0]), \
+             patch.object(Pi.select, 'select', side_effect=select), \
+             contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(KeyboardInterrupt):
+                Pi.main()
+        actions.submit.assert_called_once_with('shutdown')
+        self.assertTrue(all(call.args == (b'C0,0,0\n',) for call in ser.write.call_args_list))
+        self.assertNotIn((True,), [call.args for call in follower.set_enabled.call_args_list])

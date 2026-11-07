@@ -64,17 +64,45 @@ FOLLOW_MIN_TURN_WHEEL_SPEED = 0.28
 FOLLOW_MIN_WHEEL_SPEED = 0.18  # Minimum usable follow-mode wheel command.
 
 
-def follow_command(box, width, height):
+class FollowSteering:
+    """Start corrections outside a wider band; release near center without lag."""
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.direction = 0
+        self.pivot = False
+
+    def filter(self, error):
+        direction = 1 if error > 0 else -1
+        if self.direction and (abs(error) <= .08 or direction != self.direction):
+            self.reset()
+        if not self.direction and abs(error) >= .18:
+            self.direction = direction
+        if self.pivot and abs(error) < .50:
+            self.pivot = False
+        if abs(error) >= .70:
+            self.pivot = True
+        return error if self.direction else 0.0
+
+
+def follow_command(box, width, height, steering_controller=None):
     if box is None:
+        if steering_controller is not None:
+            steering_controller.reset()
         return 0.0, 0.0
     x, y, w, h = box
     turn = clamp(((x + w / 2) / width - 0.5) * 2)
-    if abs(turn) < 0.10:
+    if steering_controller is not None:
+        turn = steering_controller.filter(turn)
+    elif abs(turn) < .18:
         turn = 0.0
     size = w / width if FOLLOW_SIZE_METRIC == 'width' else h / height
     gap = FOLLOW_TARGET_SIZE - size
     # Never reverse automatically; stop both motors when already close enough.
     if gap <= FOLLOW_STOP_MARGIN + 1e-9:
+        if steering_controller is not None:
+            steering_controller.reset()
         return 0.0, 0.0
     # Normalize by the calibrated size: speed should not depend on how large
     # this particular person appears at the stop distance.
@@ -82,21 +110,18 @@ def follow_command(box, width, height):
     relative_error = max(0.0, (stop_size - size) / stop_size)
     forward = min(FOLLOW_MAX_SPEED,
                   FOLLOW_MIN_WHEEL_SPEED + FOLLOW_SPEED_GAIN * relative_error)
-    forward *= max(0, 1 - abs(turn) * 2)
-    steering = 0.0
-    wheel_minimum = FOLLOW_MIN_WHEEL_SPEED
-    if turn != 0:
-        # A small proportional turn used to fall inside the motor deadband.
+    pivot = steering_controller.pivot if steering_controller is not None else abs(turn) >= .70
+    if pivot:
+        # Retain enough torque to pivot only for a person far to one side.
         strength = FOLLOW_MIN_TURN + (FOLLOW_MAX_TURN - FOLLOW_MIN_TURN) * abs(turn)
-        steering = strength if turn > 0 else -strength
-        wheel_minimum = FOLLOW_MIN_TURN_WHEEL_SPEED
-    left, right = mix(forward, steering)
-    def compensate(value):
-        if abs(value) < 1e-9:
-            return 0.0
-        magnitude = min(FOLLOW_MAX_WHEEL_SPEED, max(wheel_minimum, abs(value)))
-        return magnitude if value > 0 else -magnitude
-    return compensate(left), compensate(right)
+        return (strength, -strength) if turn > 0 else (-strength, strength)
+    # Ordinary tracking uses forward arcs: never reverse the inside wheel.
+    # Keep the outside wheel powered and reduce only the inside wheel.
+    outside_minimum = FOLLOW_MIN_TURN_WHEEL_SPEED if turn else FOLLOW_MIN_WHEEL_SPEED
+    speed = max(outside_minimum, forward * (1 - .35 * abs(turn)))
+    inside = max(FOLLOW_MIN_WHEEL_SPEED, speed * (1 - .85 * abs(turn)))
+    speed = min(FOLLOW_MAX_WHEEL_SPEED, speed)
+    return (speed, inside) if turn >= 0 else (inside, speed)
 
 
 def controller_command(mode, left_x, left_forward, right_x, right_forward, lower, raise_dump):
@@ -107,3 +132,68 @@ def controller_command(mode, left_x, left_forward, right_x, right_forward, lower
         left, right = single_stick(left_x, left_forward, right_x, right_forward)
         return left, right, clamp(raise_dump - lower)
     return 0.0, 0.0, 0.0
+
+
+FOLLOW_ACCELERATION = 0.30  # Command fraction per second, above motor minimum.
+FOLLOW_DECELERATION = 0.60
+
+
+def follow_wheel_minimum(box, width, steering_controller=None):
+    pivot = steering_controller.pivot if steering_controller is not None else (
+        box is not None and abs(((box[0] + box[2] / 2) / width - .5) * 2) >= .70)
+    return FOLLOW_MIN_TURN_WHEEL_SPEED if pivot else FOLLOW_MIN_WHEEL_SPEED
+
+
+class FollowRamp:
+    """Slew usable wheel commands; all-zero requests are immediate safety stops."""
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.outputs = (0.0, 0.0)
+        self.last_time = None
+
+    def update(self, left, right, now, minimum=FOLLOW_MIN_WHEEL_SPEED):
+        if left == 0 and right == 0:
+            self.reset()
+            return self.outputs
+        dt = max(0.0, now - self.last_time) if self.last_time is not None else 0.0
+        # After a pause long enough to trip the Nano watchdog, start from rest.
+        if dt >= 0.5:
+            self.outputs = (0.0, 0.0)
+            dt = 0.0
+        self.last_time = now
+        old_turn = self.outputs[0] - self.outputs[1]
+        new_turn = left - right
+        if abs(old_turn) > 1e-9 and (abs(new_turn) < 1e-9 or old_turn * new_turn < 0):
+            # Drop obsolete steering promptly instead of ramping through it.
+            # Only lower output: opposed wheels go to zero; forward wheels match
+            # the slower wheel before building the newly requested correction.
+            common = min(self.outputs) if min(self.outputs) >= 0 else 0.0
+            self.outputs = (common, common)
+        self.outputs = tuple(self._wheel(current, target, dt, minimum)
+                             for current, target in zip(self.outputs, (left, right)))
+        return self.outputs
+
+    @staticmethod
+    def _wheel(current, target, dt, minimum):
+        target = clamp(target, FOLLOW_MAX_WHEEL_SPEED)
+        # Reversals must reach zero for at least one update before restarting.
+        reversing = current * target < 0
+        desired = 0.0 if reversing else abs(target)
+        magnitude = abs(current)
+        if desired == 0:
+            magnitude -= FOLLOW_DECELERATION * dt
+            if magnitude <= minimum + 1e-9:
+                return 0.0
+            return magnitude if current > 0 else -magnitude
+        if current == 0:
+            magnitude = min(minimum, desired)
+        else:
+            # Raising the usable minimum for a turn is a deliberate small step.
+            magnitude = max(minimum, magnitude)
+            rate = FOLLOW_ACCELERATION if desired > magnitude else FOLLOW_DECELERATION
+            change = rate * dt
+            magnitude += max(-change, min(change, desired - magnitude))
+            magnitude = max(minimum, magnitude)
+        return magnitude if target > 0 else -magnitude
