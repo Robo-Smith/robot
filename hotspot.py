@@ -1,5 +1,7 @@
-"""Password-protected NetworkManager hotspot, activated only on explicit request."""
+"""Password-protected NetworkManager hotspot and one-shot boot fallback."""
 import argparse
+from contextlib import contextmanager
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -7,6 +9,7 @@ import re
 import secrets
 import subprocess
 import tempfile
+import time
 import uuid
 
 SETTINGS = Path(__file__).resolve().parent / 'hotspot_settings.json'
@@ -88,7 +91,39 @@ class Hotspot:
         except ValueError:
             return None
 
+    @contextmanager
+    def network_lock(self):
+        # Shared with the boot service so two processes cannot switch at once.
+        lock_path = self.path.with_suffix('.lock')
+        descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        with os.fdopen(descriptor, 'w') as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            yield
+
+    def wifi_connected(self, settings):
+        state = self.run(['nmcli', '-g', 'GENERAL.STATE', 'device', 'show', settings['interface']])
+        return state.split(' ', 1)[0] == '100' and self._active(settings['interface']) is not None
+
+    def start_if_disconnected(self):
+        with self.network_lock():
+            settings = self.settings()
+            # Recheck under the lock: Wi-Fi may have connected at the deadline.
+            if self.wifi_connected(settings):
+                print('Startup network already connected; hotspot fallback skipped', flush=True)
+                return False
+            settings = self.prepare()
+            active = self._active(settings['interface'])
+            if active == settings['uuid']:
+                print('YardBot hotspot already active; leaving it running', flush=True)
+                return False
+            self._activate(settings, active)
+            return True
+
     def toggle(self):
+        with self.network_lock():
+            self._toggle()
+
+    def _toggle(self):
         settings = self.prepare()
         interface = settings['interface']
         active = self._active(interface)
@@ -102,6 +137,10 @@ class Hotspot:
                 self.run(['nmcli', '--wait', '10', 'device', 'connect', interface])
                 print('Hotspot stopped; reconnecting saved Wi-Fi', flush=True)
             return
+        self._activate(settings, active)
+
+    def _activate(self, settings, active):
+        interface = settings['interface']
         original_radio = self.run(['nmcli', '-t', '-f', 'WIFI', 'radio'])
         if original_radio not in ('enabled', 'disabled'):
             raise RuntimeError(f'Unexpected Wi-Fi radio state: {original_radio!r}')
@@ -130,14 +169,57 @@ class Hotspot:
         print(f'Hotspot {settings["ssid"]} active; join it and open {URL}', flush=True)
 
 
+def boot_seconds():
+    # Linux uptime counts suspend time and does not depend on wall-clock changes.
+    return float(Path('/proc/uptime').read_text().split()[0])
+
+
+def startup_fallback(hotspot=None, elapsed=boot_seconds, wait=time.sleep, deadline=30):
+    hotspot = hotspot if hotspot is not None else Hotspot()
+    settings = hotspot.settings()
+    observed_enabled = False
+    def log(message):
+        print(f'[boot +{elapsed():.1f}s] {message}', flush=True)
+    log(f'Checking {settings["interface"]}; hotspot fallback deadline is {deadline}s after boot')
+    while True:
+        try:
+            if hotspot.wifi_connected(settings):
+                log('Wi-Fi connected (first observed by fallback monitor); hotspot fallback not needed')
+                return False
+            radio = hotspot.run(['nmcli', '-t', '-f', 'WIFI', 'radio'])
+            if radio not in ('enabled', 'disabled'):
+                raise RuntimeError(f'Unexpected startup Wi-Fi state: {radio!r}')
+            if observed_enabled and radio == 'disabled':
+                log('Wi-Fi was turned off during startup; cancelling hotspot fallback')
+                return False
+            observed_enabled = observed_enabled or radio == 'enabled'
+        except (OSError, RuntimeError, subprocess.SubprocessError):
+            if elapsed() >= deadline:
+                raise
+        remaining = deadline - elapsed()
+        if remaining <= 0:
+            log(f'No Wi-Fi connection after {deadline}s of boot; starting YardBot hotspot')
+            began = elapsed()
+            started = hotspot.start_if_disconnected()
+            if started:
+                log(f'Hotspot ready; activation took {elapsed() - began:.1f}s; page: {URL}')
+            else:
+                log('Connection became available before activation; fallback skipped')
+            return started
+        wait(min(1, remaining))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     choice = parser.add_mutually_exclusive_group(required=True)
+    choice.add_argument('--startup-fallback', action='store_true', help='At boot, start hotspot if Wi-Fi has not connected within 30 seconds')
     choice.add_argument('--setup', action='store_true', help='Prepare inactive profile; do not disconnect Wi-Fi')
     choice.add_argument('--show-password', action='store_true', help='Display credentials locally; never shared via HTTP')
     args = parser.parse_args()
     hotspot = Hotspot()
-    if args.setup:
+    if args.startup_fallback:
+        startup_fallback(hotspot)
+    elif args.setup:
         settings = hotspot.prepare()
         print(f'Hotspot profile ready: {settings["ssid"]}. No connections changed. Address: {URL}')
         print('Use --show-password locally to see the generated Wi-Fi password.')

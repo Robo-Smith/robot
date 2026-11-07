@@ -1,0 +1,14 @@
+[Unit]
+Description=YardBot hotspot fallback when startup Wi-Fi is unavailable
+Wants=NetworkManager.service
+After=NetworkManager.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/rs/robot
+ExecStart=/usr/bin/python3 -u /home/rs/robot/hotspot.py --startup-fallback
+RemainAfterExit=yes
+TimeoutStartSec=90s
+
+[Install]
+WantedBy=multi-user.target

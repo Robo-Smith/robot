@@ -886,3 +886,70 @@ stops motors and requires enabling again. No automatic re-enabling is added.
 Update `status_server.py`, `teleop.py`, and `web/teleop.js`, restart robot.service,
 and reopen the page. Check real phone behavior with wheels lifted. If control
 still disables, record the displayed reason before pressing enable again.
+
+## Automatic hotspot fallback at boot
+
+`robot-hotspot-fallback.service` checks the configured Wi-Fi adapter during the
+first **30 seconds of Linux boot uptime**. A connected saved Wi-Fi profile or an
+already active hotspot cancels fallback. If it remains disconnected at the
+30-second deadline, the service starts YardBot using the existing SSID/password
+and http://10.42.0.1:8080 address. It rechecks connectivity immediately before
+activation and never uses the toggle operation, so it cannot turn an already
+running hotspot off. A connection does not need internet access to count.
+
+This is a separate, one-shot boot service. It does not run again merely because
+robot.service restarts, and does not switch to hotspot after a later Wi-Fi loss.
+Activation takes additional NetworkManager negotiation time after the deadline.
+If Wi-Fi is deliberately turned off during the startup check, fallback is
+cancelled; a radio already disabled at boot can be enabled by the fallback.
+Network switching is coordinated with the manual hotspot action by a local file
+lock. No drive-mode selection or motor command changes are made.
+
+Deploy updated `hotspot.py` and `robot-hotspot-fallback.service`. Install/enable
+without changing the current connection:
+
+```sh
+sudo cp ~/robot/robot-hotspot-fallback.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable robot-hotspot-fallback.service
+```
+
+It runs on the next boot; enabling it does not activate a hotspot immediately.
+The existing root-only hotspot credential file and NetworkManager profile are
+reused. To view startup results after reboot:
+
+```sh
+sudo systemctl status robot-hotspot-fallback.service --no-pager
+sudo journalctl -u robot-hotspot-fallback.service -b --no-pager
+```
+
+To disable automatic fallback, use `sudo systemctl disable
+robot-hotspot-fallback.service` (on one line). Manual D-pad/web hotspot control
+remains available. Test one reboot near the saved home network and one out of
+range; the second should broadcast YardBot after approximately 30 seconds plus
+activation time. Automated tests simulate time and networking, and do not switch
+the Pi's actual network.
+
+
+### Startup connection timing logs
+
+The fallback deadline is now 30 seconds from Linux boot uptime. Its journal
+messages include `[boot +Xs]` timestamps for monitor startup, first observed
+Wi-Fi connection, fallback activation start, and hotspot readiness with activation
+duration. Wi-Fi is polled about once per second, so this is the monitor's first
+observation, not an exact timestamp if Wi-Fi connected before the monitor started.
+
+```sh
+sudo journalctl -u robot-hotspot-fallback.service -b -o short-monotonic --no-pager
+```
+
+For NetworkManager's detailed connection/association/DHCP timing from this boot:
+
+```sh
+sudo journalctl -u NetworkManager.service -b -o short-monotonic --no-pager
+```
+
+To watch fallback logs as they arrive, add `-f` instead of `--no-pager`. These
+journal logs are separate from `/home/rs/robot.log`, which is the main robot
+program's output. Updated `hotspot.py` is picked up by the installed fallback
+service on the next reboot; no daemon reload or current network switch is needed.

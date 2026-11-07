@@ -9,3 +9,6 @@ follow_settings.json
 # Per-robot hotspot credentials (never commit)
 hotspot_settings.json
 .hotspot-*
+
+# Hotspot inter-process coordination
+hotspot_settings.lock
