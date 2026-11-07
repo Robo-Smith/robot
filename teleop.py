@@ -21,6 +21,7 @@ class Teleop:
             self.deadline = 0.0
             self.sequence = -1
             self.axes = (0.0, 0.0)
+            self.dump = 0.0
             self.stop_requested = False
 
     def take_stop(self):
@@ -34,6 +35,7 @@ class Teleop:
             self.stop_requested = True
             self.owner = None
             self.axes = (0.0, 0.0)
+            self.dump = 0.0
 
     def enable(self, now=None):
         now = time.monotonic() if now is None else now
@@ -46,23 +48,28 @@ class Teleop:
             self.deadline = now + self.TIMEOUT
             self.sequence = -1
             self.axes = (0.0, 0.0)
+            self.dump = 0.0
             return self.owner
 
-    def command(self, owner, sequence, x, forward, now=None):
+    def command(self, owner, sequence, x, forward, now=None, dump=0):
         now = time.monotonic() if now is None else now
         if type(sequence) is not int or sequence < 0:
             raise ValueError('Invalid sequence')
         if any(type(v) not in (float, int) or not math.isfinite(v) or abs(v) > 1 for v in (x, forward)):
             raise ValueError('Joystick values must be finite and between -1 and 1')
+        if type(dump) not in (int, float) or dump not in (-1, 0, 1):
+            raise ValueError('Dump command must be -1, 0, or 1')
         with self.lock:
             self._expire(now)
             if not self.owner or not secrets.compare_digest(str(owner), self.owner):
                 raise ValueError('Control disabled or expired; enable again')
             if sequence <= self.sequence:
-                raise ValueError('Old control message ignored')
+                return False  # A late packet is harmless; do not renew the lease.
             self.sequence = sequence
             self.axes = (x, forward)
+            self.dump = float(dump)
             self.deadline = now + self.TIMEOUT
+            return True
 
     def disable(self, owner):
         with self.lock:
@@ -70,6 +77,7 @@ class Teleop:
                 self.stop_requested = True
                 self.owner = None
                 self.axes = (0.0, 0.0)
+                self.dump = 0.0
 
     def outputs(self, now=None):
         now = time.monotonic() if now is None else now
@@ -78,8 +86,9 @@ class Teleop:
             if not self.owner:
                 return None
             x, forward = self.axes
+            dump = self.dump
         left, right = single_stick(x, forward, 0, 0)
-        return left * self.MAX_SPEED, right * self.MAX_SPEED, 0.0
+        return left * self.MAX_SPEED, right * self.MAX_SPEED, dump
 
     def active(self):
         return self.outputs() is not None

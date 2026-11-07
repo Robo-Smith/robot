@@ -4,6 +4,7 @@ import time
 
 from robot_control import follow_command, save_calibration, FOLLOW_SETTINGS, FOLLOW_SIZE_METRIC
 from person_detector import PersonDetector
+from camera_overlay import annotate_frame
 
 
 def configure_camera(camera):
@@ -28,6 +29,8 @@ class PersonFollower:
         self.wake = threading.Event()
         self.stopping = threading.Event()
         self.preview_until = 0.0
+        self.detect_until = 0.0
+        self.observation = (0.0, 0, False)
         self.jpeg = None
         self.jpeg_time = 0.0
         self.state = 'idle'
@@ -53,9 +56,11 @@ class PersonFollower:
             box = None
         return box, width, height
 
-    def request_preview(self):
+    def request_preview(self, detect=False):
         with self.lock:
             self.preview_until = time.monotonic() + 3.0
+            if detect:
+                self.detect_until = self.preview_until
         self.wake.set()
 
     def preview_jpeg(self):
@@ -64,10 +69,14 @@ class PersonFollower:
 
     def camera_status(self):
         with self.lock:
-            timestamp, box, _, _ = self.latest
-            fresh = timestamp >= self.enabled_since and time.monotonic() - timestamp <= .5
+            observed, count, available = self.observation
+            detecting = self.enabled.is_set() or time.monotonic() < self.detect_until
+            observation_fresh = time.monotonic() - observed <= .5
             return {'state': self.state, 'error': self.error,
-                    'person_detected': box is not None and fresh}
+                    'person_detected': count > 0 and available and observation_fresh and detecting,
+                    'person_count': count if available and observation_fresh and detecting else 0,
+                    'detection_state': 'off' if not detecting else 'unavailable' if not available else
+                                       'stale' if not observation_fresh else 'person' if count else 'none'}
 
     def close(self):
         self.stopping.set()
@@ -83,6 +92,7 @@ class PersonFollower:
             while not self.stopping.is_set():
                 with self.lock:
                     preview = time.monotonic() < self.preview_until
+                    preview_detection = time.monotonic() < self.detect_until
                 following = self.enabled.is_set()
                 if not following and not preview:
                     with self.lock:
@@ -105,14 +115,14 @@ class PersonFollower:
                         print('Shared camera started: 640x480 preview / follow', flush=True)
                     started = time.monotonic()
                     frame = camera.capture_array()
-                    boxes = []
+                    boxes, scores = [], []
                     detection_error = ''
-                    if following:
+                    if following or preview_detection:
                         try:
                             if detector is None and started >= detector_retry:
                                 detector = PersonDetector()
                             if detector is not None:
-                                boxes, _ = detect_people(detector, frame)
+                                boxes, scores = detect_people(detector, frame)
                         except Exception as exc:
                             detector = None
                             detector_retry = time.monotonic() + 5
@@ -120,6 +130,9 @@ class PersonFollower:
                             print(detection_error, flush=True)
                         if detector is None and not detection_error:
                             detection_error = 'Person detector waiting to retry; follow stopped'
+                        with self.lock:
+                            self.observation = (started, len(boxes), detector is not None and not detection_error)
+                    if following:
                         box = max(boxes, key=lambda value: value[2] * value[3], default=None)
                         with self.lock:
                             self.latest = (started, box, frame.shape[1], frame.shape[0])
@@ -140,7 +153,10 @@ class PersonFollower:
                                   f'{reason}, requested L={left:.2f} R={right:.2f}', flush=True)
                             last_report = time.monotonic()
                     if preview and time.monotonic() - self.jpeg_time >= .2:
-                        ok, encoded = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
+                        display = (annotate_frame(frame, boxes, scores, following,
+                                                  time.monotonic() - started, detection_error)
+                                   if following or preview_detection else frame)
+                        ok, encoded = cv2.imencode('.jpg', display, [cv2.IMWRITE_JPEG_QUALITY, 75])
                         if ok:
                             with self.lock:
                                 self.jpeg, self.jpeg_time = encoded.tobytes(), started

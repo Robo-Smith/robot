@@ -37,8 +37,7 @@ class TeleopTests(unittest.TestCase):
     def test_release_zero_and_sequence_prevent_delayed_motion(self):
         owner = self.control.enable(now=0)
         self.control.command(owner, 2, 0, 0, now=.1)
-        with self.assertRaises(ValueError):
-            self.control.command(owner, 1, 1, 1, now=.2)
+        self.assertFalse(self.control.command(owner, 1, 1, 1, now=.2))
         self.assertEqual(self.control.outputs(now=.3), (0, 0, 0))
 
     def test_disable_and_physical_override_invalidate_old_session(self):
@@ -61,3 +60,40 @@ class TeleopTests(unittest.TestCase):
             self.control.command('wrong-owner', 1, 1, 1, now=.1)
         self.control.disable('wrong-owner')
         self.assertEqual(self.control.outputs(now=.2), (0, 0, 0))
+
+    def test_dump_and_lower_require_valid_enabled_session(self):
+        owner = self.control.enable(now=0)
+        self.control.command(owner, 1, 0, 0, now=.1, dump=1)
+        self.assertEqual(self.control.outputs(now=.2), (0, 0, 1))
+        self.control.command(owner, 2, 0, 0, now=.2, dump=-1)
+        self.assertEqual(self.control.outputs(now=.3), (0, 0, -1))
+        self.control.command(owner, 3, 0, 0, now=.3, dump=0)
+        self.assertEqual(self.control.outputs(now=.4), (0, 0, 0))
+
+    def test_expiry_disable_and_mode_override_stop_dump(self):
+        for method in ('expiry', 'disable', 'reset'):
+            control = Teleop()
+            owner = control.enable(now=0)
+            control.command(owner, 1, 0, 0, now=.1, dump=1)
+            if method == 'disable':
+                control.disable(owner)
+            elif method == 'reset':
+                control.reset()
+            self.assertIsNone(control.outputs(now=.6))
+            self.assertEqual(control.dump, 0)
+
+    def test_dump_validation_and_out_of_order_release(self):
+        owner = self.control.enable(now=0)
+        for value in (True, 2, .5, float('nan'), '1'):
+            with self.assertRaises(ValueError):
+                self.control.command(owner, 1, 0, 0, now=.1, dump=value)
+        self.control.command(owner, 2, 0, 0, now=.1, dump=0)
+        self.assertFalse(self.control.command(owner, 1, 0, 0, now=.2, dump=1))
+        self.assertEqual(self.control.outputs(now=.3), (0, 0, 0))
+
+    def test_delayed_commands_are_ignored_without_extending_lease(self):
+        owner = self.control.enable(now=0)
+        self.assertTrue(self.control.command(owner, 3, 0, 0, now=.1, dump=0))
+        self.assertFalse(self.control.command(owner, 2, 1, 1, now=.3, dump=1))
+        self.assertEqual(self.control.outputs(now=.35), (0, 0, 0))
+        self.assertIsNone(self.control.outputs(now=.51))

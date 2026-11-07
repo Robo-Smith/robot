@@ -650,3 +650,239 @@ update or calibration is needed. Start with wheels lifted: verify short taps do
 nothing, enable/drag/release, disable, physical X override, tab hiding, and loss of
 Wi-Fi stop the robot. Software tests mock motors and camera; actual phone/browser
 and radio behavior still require robot testing.
+
+## OpenCV detection overlays in the web feed
+
+The web camera feed now uses OpenCV to draw detection results directly onto the
+JPEG frames. Green boxes show detected people and model confidence; in follow
+mode the largest box (the selected target) is gold and labeled **Follow target**.
+The banner explicitly distinguishes **No person detected**, **Detection stale**,
+and **Detection unavailable**. A missing box on a visible person means the model
+has not identified them; the robot cannot independently recognize a false negative.
+
+Viewing the feed requests person detection even outside follow mode. These
+preview-only results do not enable follow mode or provide autonomous motor input.
+Labels say **Preview only** outside follow mode, including web tele-operation.
+The camera and model are shared with follow mode, so overlays use the same frame
+and inference result rather than a second camera connection/model. Motor mixing,
+steering hysteresis and ramps still run separately in the controller loop.
+The matching result is drawn on a frame copy, preserving the original image.
+Preview-only detection may lower feed refresh rate on the Pi compared with raw
+JPEG preview. It expires with viewer demand after three seconds; follow detection
+continues when explicitly enabled. Stale results still stop autonomous drive.
+
+Deploy updated `person_follower.py`, `status_server.py`, `web/index.html`, and new
+`camera_overlay.py`; restart robot.service and reload the page. No calibration,
+firmware or model download changes are needed. Check annotations on the Pi's real
+camera feed; rendering tests use synthetic frames and worker tests mock hardware.
+
+## ToF and robot telemetry on the dashboard
+
+The Motor Requests panel now also shows:
+
+- TF-Luna distance in centimeters and raw signal strength.
+- Signal validity, sensor/packet freshness, and the existing forward stop/slow zone.
+- Nano-applied left/right/dump commands after obstacle limiting, alongside the
+  Pi's requested commands (neither is a wheel-speed measurement).
+- Nano command watchdog state, telemetry age, and uptime.
+- Pi CPU temperature and uptime, where the OS exposes them.
+
+**Upload the updated `Arduino-Nano/Arduino-Nano.ino`** for the ToF/Nano fields.
+Stop robot.service before uploading. Then deploy updated `Pi.py`, `status_server.py`,
+`web/index.html`, new `nano_telemetry.py` and `web/telemetry.js`, restart robot.service,
+and reload the page. Existing command frames and motor behavior are unchanged;
+older firmware remains compatible but reports no telemetry. Pi temperature/uptime
+do not require the Nano update. The A7 voltage-divider input remains unwired in
+the documented hardware, so robot battery voltage is not invented or displayed.
+
+Nano sends a bounded ASCII line five times per second:
+
+```text
+Tdistance_cm,signal,sensor_age_ms,command_age_ms,watchdog,left,right,dump,uptime_ms
+```
+
+Motor commands are signed -1000..1000. Ages saturate at 65535 milliseconds; sensor
+age starts at 65535 until an I2C reading arrives. A complete frame is queued only
+when Serial.availableForWrite reports enough space, so telemetry never waits for
+UART capacity. The Pi reads at most 512 currently available bytes per control tick,
+assembles partial lines, rejects malformed/oversized data, and marks packets stale
+after one second. This follows the [Arduino nonblocking serial guidance](https://docs.arduino.cc/language-reference/en/functions/communication/serial/write/).
+
+Signal validity matches the existing motor filter: strictly greater than 150 and
+less than 55000. A sensor reading older than 500 ms is flagged on the page; the
+firmware's existing use of its last sensor sample is unchanged. Forward output
+is stopped below 20 cm and halved through 100 cm with a valid signal. The UI
+shows raw unreliable readings as **unverified**, rather than treating them as a
+confirmed obstacle distance. The Nano watchdog still stops all motors after
+500 ms without a valid command. Its reported output is the command sent to PWM,
+not physical motor feedback. Firmware uptime rolls over with Arduino millis().
+
+Verification covers fragmented telemetry, malformed data, read-size limits,
+staleness, threshold boundaries and dashboard JSON. A host C++ harness compiled
+and exercised the sketch with stubbed hardware, checking telemetry against
+obstacle limiting/watchdog behavior and a full transmit buffer. An actual AVR
+build and physical ToF/dashboard check remain necessary on the robot.
+
+## Front HC-SR04 sonar readings
+
+The two documented front sonars are now read by the Nano and displayed in the
+Motor Requests panel: front-left trigger D9 / echo D8, front-right trigger D12 /
+echo D11. The rear sonar listed in the pin comments is still unused.
+
+Pings alternate every 70 ms (each sensor roughly every 140 ms), reducing acoustic
+cross-talk. Each uses a 10 microsecond trigger and echo width / 58 for centimeters,
+following the [HC-SR04 datasheet](https://cdn.sparkfun.com/datasheets/Sensors/Proximity/HCSR04.pdf).
+The echo wait is explicitly capped at 12000 microseconds, limiting the added wait
+to about 12 ms per ping and the configured usable range to 2–200 cm. Missing,
+too-short, or out-of-range echoes clear the reading; they are not interpreted as
+zero distance or a confirmed clear path. Sensor readings expire after 500 ms.
+
+Sonar is **telemetry-only** in this version. The existing TF-Luna is still the
+source of motor obstacle limiting; sonar samples do not change drive commands.
+Verify the corner readings on real obstacles before using them for motor control.
+
+The Nano now alternates `T` and `S` frames every 100 ms, keeping both types at five
+messages/second without exceeding the UART transmit buffer. Sonar frame format:
+
+```text
+Sleft_cm,right_cm,left_age_ms,right_age_ms
+```
+
+A zero distance means no usable echo. Ages saturate at 65535 ms. Each frame is
+independently nonblocking on transmit and independently timestamped on the Pi.
+Older T-only firmware still works, with the sonar fields showing Not reported.
+
+Stop robot.service, upload the updated Nano sketch, update `nano_telemetry.py`,
+`web/index.html`, and `web/telemetry.js`, then start robot.service and reload the
+page. Verify each side separately with a large flat target 20–100 cm ahead of it,
+and check that unplugged/no-echo readings do not appear as zero centimeters.
+The host firmware harness covers timing/pin selection/conversion/telemetry and
+the watchdog with simulated hardware; actual AVR compilation and sonar wiring
+still need checking on the robot.
+
+## Page mode selection and system controls
+
+The Robot Controls panel now exposes Stop, physical Stadia single-stick mode,
+follow-me, Wi-Fi **on**, hotspot switching, and Pi shutdown. Manual and Wi-Fi-off
+are intentionally unavailable from the page. Web tele-operation retains its
+separate hold-to-enable joystick controls.
+
+Drive modes are mutually exclusive. Stop is immediate on the next control tick.
+Single-stick selection requires a connected Stadia controller and clears cached
+stick/trigger values, requiring fresh input. Follow-me uses a slide-to-confirm
+control and keeps following if the page closes, like selecting Y on Stadia.
+The current-mode display remains the source of truth even when the physical
+controller changes modes.
+
+Hotspot switching and shutdown use momentary **sliding confirmations**, not
+independent on/off toggles. Begin near the left end and drag fully right; a tap
+at the right edge does not execute the action. Keyboard users can move the
+focused slider right and then press Enter to confirm. Sliders return to the left
+after a request. Hotspot can switch either to YardBot or back to the previous
+Wi-Fi and will disconnect the page during the transition. Retrieve credentials
+locally before using it, then open http://10.42.0.1:8080 on YardBot. Shutdown
+stops all motors first. Wi-Fi-on never turns a working radio off.
+
+All actions use the same-origin/token checks as tele-operation and a bounded,
+two-second request queue. The HTTP server never changes motors or system state
+directly. The motor loop stops outputs and revokes browser joystick control before
+applying a page selection, then dispatches system actions to the background worker.
+Stop can replace a queued request. Physical mode selections cancel pending page
+selections. Stale requests and disallowed modes are rejected. Existing controller
+and web-driving timeout behavior remains in place. System completion/failure
+messages are shown in the panel; network switching/shutdown may interrupt delivery.
+
+Deploy updated `Pi.py`, `status_server.py`, `controller_actions.py`, `web/index.html`,
+`web/teleop.js`, new `web_actions.py` and `web/controls.js`, then restart robot.service
+and reload the page. No Nano update is required for these page controls.
+The earlier statement that the web page cannot switch networks or shut down is
+superseded by these explicitly confirmed actions. Use the trusted LAN/hotspot only.
+
+
+### Blue/grey controls refresh
+
+The dashboard now uses a blue and grey robot theme, with red reserved for the
+prominent Stop All Motors button. Sliders are labeled “Slide to follow-me →”,
+“Slide home / hotspot →”, and “Slide to shutdown Pi →”. Their existing deliberate
+slide-to-confirm behavior is retained. The Wi-Fi-on button and web action have
+been removed; the controller's existing Wi-Fi toggle is unaffected. This
+supersedes the earlier page-control instructions mentioning a Wi-Fi-on button.
+
+Deploy updated `web/index.html`, `web/controls.js`, `web_actions.py`, `Pi.py`, and
+`controller_actions.py`; restart robot.service and reload the page. No Nano
+firmware or calibration change is needed for this UI update.
+
+## Tele-operation dump controls
+
+The web tele-operation panel now has **Dump** (raise) and **Lower** buttons.
+Enable tele-operation with the existing one-second hold first. Hold a button to
+run the dump motor; release, pointer cancellation, or lost pointer capture stops
+that command. Touch/mouse and Space/Enter holds are supported. Holding both
+opposing controls commands neutral; releasing one continues the remaining held
+direction. Joystick driving and dump operation can be used together.
+
+The dump uses the same full-speed signed commands as fully pressed physical
+triggers. Releasing the joystick stops the drives but leaves an independently
+held dump button active. Disabling tele-operation, leaving/hiding the page,
+losing focus, an expired heartbeat, physical mode override or Stop resets both
+driving and dump. Dump is not available to a browser without its own valid enabled
+lease. Old clients that omit dump still command neutral. This supersedes the
+earlier description that web tele-operation always disables dump.
+
+The extra camera-preview and joystick instruction sentences were removed from
+the page to reduce clutter. Update `teleop.py`, `status_server.py`, `web/index.html`
+and `web/teleop.js`, restart robot.service, and reload the page. No Nano update is
+needed for these controls. Check direction/release/disable with the robot stopped
+before operating the dump under load.
+
+
+## UPower controller battery fallback
+
+The battery reader now falls back to UPower when sysfs lacks charge percentage or
+voltage. It enumerates gaming-input devices and matches the connected controller's
+Bluetooth address, rather than selecting an unrelated battery. The observed
+Stadia UPower object reports 99% charge and no voltage; the page displays the
+percentage and leaves voltage as Not reported. No percentage-to-voltage conversion
+is used. When no evdev identity is available, device details must identify Stadia.
+
+The optional `upower` utility is queried in the HTTP status worker with a total
+1.5-second budget; results use the existing ten-second dashboard cache. Missing
+UPower or permissions do not affect driving. Coarse battery levels are shown as
+levels rather than invented precise percentages, following the
+[UPower device specification](https://upower.freedesktop.org/docs/Device.html).
+Update `controller_battery.py` and restart robot.service to load the fallback.
+
+### Phone hold buttons and text selection
+
+The tele-operation controls now suppress text selection and touch callout menus
+using WebKit-prefixed CSS, prevent default pointer-down behavior on enable, and
+register non-passive touch gesture handlers on the enable/joystick/dump controls.
+Context-menu/selection/drag gestures are suppressed only in the control area;
+ordinary scrolling elsewhere on the page remains available. Hold/release and
+pointer-cancellation behavior is retained. Update `web/index.html` and
+`web/teleop.js`, then reload or close/reopen the page on the phone. No service or
+firmware change is required. Simulated gesture checks pass; actual iOS/Android
+long-press behavior needs checking on the device. See the
+[Safari CSS reference](https://developer.apple.com/library/archive/documentation/AppleApplications/Reference/SafariCSSRef/Articles/StandardCSSProperties.html)
+for selection/callout properties.
+
+### Mobile tele-operation connection stability
+
+The HTTP server now supports persistent HTTP/1.1 connections, reducing repeated
+TCP setup while video/status/control requests share a phone connection. Browser
+command requests have a one-second response timeout instead of 300 ms, with up
+to two regular control requests in flight and immediate release commands allowed
+through. An isolated transport error does not disable control if a recent valid
+acknowledgment still proves the session alive; server rejection still disables it.
+Disconnect reasons remain visible rather than being replaced at the next status
+refresh. This helps distinguish focus loss, robot readiness, network timeouts,
+and an expired/overridden session on a phone without a developer console.
+
+Out-of-order commands now receive a successful ignored acknowledgment and do not
+extend the lease or change motor outputs. This avoids treating an old request
+arriving after a release as a lost session. The server's **400 ms command lease**
+and the Nano's watchdog remain unchanged; a prolonged network interruption still
+stops motors and requires enabling again. No automatic re-enabling is added.
+Update `status_server.py`, `teleop.py`, and `web/teleop.js`, restart robot.service,
+and reopen the page. Check real phone behavior with wheels lifted. If control
+still disables, record the displayed reason before pressing enable again.

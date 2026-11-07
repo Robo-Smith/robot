@@ -60,6 +60,7 @@ class DetectionTests(unittest.TestCase):
                              IMWRITE_JPEG_QUALITY=1)
         with patch.dict(sys.modules, {'picamera2': SimpleNamespace(Picamera2=camera_type), 'cv2': cv}), \
              patch('person_follower.configure_camera'), \
+             patch('person_follower.annotate_frame', side_effect=lambda frame, *args: frame), \
              patch('person_follower.PersonDetector') as detector:
             self.follower._run()
         camera_type.assert_called_once()
@@ -85,9 +86,37 @@ class DetectionTests(unittest.TestCase):
                              IMWRITE_JPEG_QUALITY=1)
         with patch.dict(sys.modules, {'picamera2': SimpleNamespace(Picamera2=camera_type), 'cv2': cv}), \
              patch('person_follower.configure_camera'), \
+             patch('person_follower.annotate_frame', side_effect=lambda frame, *args: frame), \
              patch('person_follower.PersonDetector', return_value=detector):
             self.follower._run()
         camera_type.assert_called_once()
         detector.detect.assert_called_once()
         self.assertEqual(self.follower.preview_jpeg(), b'jpeg')
         self.assertEqual(self.follower.detection()[0], self.box)
+
+    def test_detection_preview_does_not_publish_autonomous_drive_input(self):
+        import sys
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        self.follower.set_enabled(False)
+        self.follower.request_preview(detect=True)
+        camera = Mock()
+        def capture():
+            self.follower.stopping.set()
+            return SimpleNamespace(shape=(480, 640, 3))
+        camera.capture_array.side_effect = capture
+        detector = Mock()
+        detector.detect.return_value = ([self.box], [.9])
+        cv = SimpleNamespace(imencode=Mock(return_value=(True, SimpleNamespace(tobytes=lambda: b'jpeg'))),
+                             IMWRITE_JPEG_QUALITY=1)
+        with patch.dict(sys.modules, {'picamera2': SimpleNamespace(Picamera2=Mock(return_value=camera)), 'cv2': cv}), \
+             patch('person_follower.configure_camera'), \
+             patch('person_follower.annotate_frame', side_effect=lambda frame, *args: frame) as overlay, \
+             patch('person_follower.PersonDetector', return_value=detector):
+            self.follower._run()
+        overlay.assert_called_once()
+        self.assertFalse(overlay.call_args.args[3])  # Preview, not follow target selection.
+        self.assertIsNone(self.follower.detection()[0])
+        self.assertTrue(self.follower.camera_status()['person_detected'])
+        self.assertEqual(self.follower.camera_status()['detection_state'], 'person')
+        self.assertFalse(self.follower.enabled.is_set())

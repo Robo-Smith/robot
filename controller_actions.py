@@ -54,11 +54,22 @@ class SystemActions:
     def __init__(self):
         self.lock = threading.Lock()
         self.shutdown_pending = threading.Event()
+        self.info_lock = threading.Lock()
+        self.info = {'busy': False, 'action': None, 'message': ''}
+
+    def snapshot(self):
+        with self.info_lock:
+            return dict(self.info)
+
+    def _status(self, **values):
+        with self.info_lock:
+            self.info.update(values)
 
     def submit(self, action):
         if not self.lock.acquire(blocking=False):
             print('System action already running; release and hold again to retry', flush=True)
             return False
+        self._status(busy=True, action=action, message=f'{action.replace("_", " ")} requested')
         if action == 'shutdown':
             self.shutdown_pending.set()
         threading.Thread(target=self._run, args=(action,), daemon=True).start()
@@ -85,10 +96,13 @@ class SystemActions:
                 Hotspot().toggle()
             else:
                 raise ValueError(f'Unknown system action: {action}')
+            self._status(message=f'{action.replace("_", " ")} request completed')
         except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
             detail = getattr(exc, 'stderr', None) or str(exc)
+            self._status(message=f'{action} failed: {detail.strip()}')
             print(f'System action {action} failed: {detail.strip()}', flush=True)
             if action == 'shutdown':
                 self.shutdown_pending.clear()
         finally:
+            self._status(busy=False)
             self.lock.release()

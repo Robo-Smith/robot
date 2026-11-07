@@ -28,7 +28,7 @@ class RecoveryTests(unittest.TestCase):
         with patch.object(Pi, 'find_stadia_controller', return_value=controller), \
              patch.object(Pi.serial, 'Serial', return_value=serial) as connect, \
              patch.object(Pi, 'PersonFollower', return_value=follower), \
-             patch.object(Pi, 'start_dashboard', return_value=Mock(teleop=Mock(outputs=Mock(return_value=None), take_stop=Mock(return_value=False)))), patch.object(Pi.signal, 'signal'), patch.object(Pi.time, 'sleep'), \
+             patch.object(Pi, 'start_dashboard', return_value=Mock(actions=Mock(take=Mock(return_value=None)), teleop=Mock(outputs=Mock(return_value=None), take_stop=Mock(return_value=False)))), patch.object(Pi.signal, 'signal'), patch.object(Pi.time, 'sleep'), \
              patch.object(Pi.select, 'select', side_effect=[([controller], [], []), KeyboardInterrupt]), \
              contextlib.redirect_stdout(output):
             with self.assertRaises(KeyboardInterrupt):
@@ -73,7 +73,7 @@ class RecoveryTests(unittest.TestCase):
              patch.object(Pi.serial, 'Serial', return_value=ser), \
              patch.object(Pi, 'PersonFollower', return_value=follower), \
              patch.object(Pi, 'SystemActions', return_value=actions), \
-             patch.object(Pi, 'start_dashboard', return_value=Mock(teleop=Mock(outputs=Mock(return_value=None), take_stop=Mock(return_value=False)))), patch.object(Pi.signal, 'signal'), patch.object(Pi.time, 'sleep'), \
+             patch.object(Pi, 'start_dashboard', return_value=Mock(actions=Mock(take=Mock(return_value=None)), teleop=Mock(outputs=Mock(return_value=None), take_stop=Mock(return_value=False)))), patch.object(Pi.signal, 'signal'), patch.object(Pi.time, 'sleep'), \
              patch.object(Pi.time, 'monotonic', side_effect=lambda: now[0]), \
              patch.object(Pi.select, 'select', side_effect=select), \
              contextlib.redirect_stdout(io.StringIO()):
@@ -86,7 +86,7 @@ class RecoveryTests(unittest.TestCase):
     def test_web_driving_without_stadia_stops_on_lease_loss(self):
         from teleop import Teleop
         control = Teleop()
-        dashboard = Mock(teleop=control)
+        dashboard = Mock(actions=Mock(take=Mock(return_value=None)), teleop=control)
         ser = Mock()
         follower = Mock()
         now = [0.0]
@@ -95,7 +95,7 @@ class RecoveryTests(unittest.TestCase):
             steps[0] += 1
             if steps[0] == 1:
                 owner = control.enable(now=0)
-                control.command(owner, 1, 0, 1, now=0)
+                control.command(owner, 1, 0, 1, now=0, dump=1)
             elif steps[0] == 2:
                 now[0] = .6
             else:
@@ -113,6 +113,38 @@ class RecoveryTests(unittest.TestCase):
             with self.assertRaises(KeyboardInterrupt):
                 Pi.main()
         writes = [call.args[0] for call in ser.write.call_args_list]
-        self.assertIn(b'C650,650,0\n', writes)
-        moving = writes.index(b'C650,650,0\n')
+        self.assertIn(b'C650,650,1000\n', writes)
+        moving = writes.index(b'C650,650,1000\n')
         self.assertTrue(all(frame == b'C0,0,0\n' for frame in writes[moving + 1:]))
+
+    def test_page_shutdown_is_executed_after_neutral_in_motor_loop(self):
+        import threading
+        from teleop import Teleop
+        from web_actions import WebActions
+        dashboard = Mock(teleop=Teleop(), actions=WebActions())
+        ser, follower, actions = Mock(), Mock(), Mock()
+        actions.shutdown_pending = threading.Event()
+        def submit(action):
+            self.assertEqual(action, 'shutdown')
+            self.assertEqual(ser.write.call_args.args, (b'C0,0,0\n',))
+            actions.shutdown_pending.set()
+            return True
+        actions.submit.side_effect = submit
+        iterations = [0]
+        def select(*args):
+            iterations[0] += 1
+            if iterations[0] > 1:
+                raise KeyboardInterrupt
+            dashboard.actions.request('shutdown', confirmed=True)
+            return [], [], []
+        with patch.object(Pi, 'find_stadia_controller', side_effect=RuntimeError('No controller')), \
+             patch.object(Pi.serial, 'Serial', return_value=ser), \
+             patch.object(Pi, 'PersonFollower', return_value=follower), \
+             patch.object(Pi, 'SystemActions', return_value=actions), \
+             patch.object(Pi, 'start_dashboard', return_value=dashboard), \
+             patch.object(Pi.signal, 'signal'), patch.object(Pi.time, 'sleep'), \
+             patch.object(Pi.select, 'select', side_effect=select), \
+             contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(KeyboardInterrupt):
+                Pi.main()
+        actions.submit.assert_called_once_with('shutdown')

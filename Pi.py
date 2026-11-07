@@ -9,6 +9,7 @@ import serial
 from person_follower import PersonFollower
 from controller_actions import DpadHolds, SystemActions
 from status_server import start_dashboard
+from nano_telemetry import NanoTelemetry
 from robot_control import clamp, follow_command, controller_command, FollowRamp, follow_wheel_minimum, FollowSteering
 
 SERIAL_PORT = '/dev/ttyUSB0'
@@ -57,7 +58,10 @@ def main():
             controller = ser = None
             try:
                 dashboard.update(mode='stop', connected=False, outputs=[0, 0, 0],
-                                 controller_name='', controller_id='', teleop_ready=False, message='Connecting to Nano')
+                                 controller_name='', controller_id='', teleop_ready=False,
+                                 nano={'available': False, 'fresh': False, 'age_s': None, 'tof_state': 'unavailable'},
+                                 message='Connecting to Nano')
+                telemetry = NanoTelemetry()
                 ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=0, write_timeout=0.1)
                 time.sleep(2)  # Nano resets when the serial port opens.
                 send(ser)
@@ -108,6 +112,7 @@ def main():
                             if event.type == evdev.ecodes.EV_SYN and event.code == evdev.ecodes.SYN_DROPPED:
                                 send(ser)
                                 mode = 'stop'
+                                dashboard.actions.clear()
                                 dashboard.teleop.reset()
                                 follow_ramp.reset()
                                 follow_steering.reset()
@@ -139,6 +144,7 @@ def main():
                             if system_actions.shutdown_pending.is_set():
                                 continue
                             if event.type == evdev.ecodes.EV_KEY and event.value == 1 and event.code in BUTTON_MODES:
+                                dashboard.actions.clear()
                                 dashboard.teleop.reset()
                                 mode = BUTTON_MODES[event.code]
                                 follow_ramp.reset()
@@ -152,6 +158,24 @@ def main():
                     if time.monotonic() < next_tick:
                         continue
                     next_tick = time.monotonic() + TICK
+                    nano = telemetry.read(ser)
+                    page_action = dashboard.actions.take()
+                    if page_action and not resyncing and not system_actions.shutdown_pending.is_set():
+                        # All page selections stop motors and discard prior control first.
+                        send(ser)
+                        dashboard.teleop.reset()
+                        mode = 'stop'
+                        axes.clear()
+                        follow_ramp.reset()
+                        follow_steering.reset()
+                        follower.set_enabled(False)
+                        if page_action == 'follow':
+                            mode = 'follow'
+                            follower.set_enabled(True)
+                        elif page_action == 'single' and controller is not None:
+                            mode = 'single'
+                        elif page_action in ('hotspot', 'shutdown'):
+                            system_actions.submit(page_action)
                     action = holds.poll(time.monotonic())
                     if action and not system_actions.shutdown_pending.is_set():
                         if action == 'shutdown':
@@ -192,7 +216,8 @@ def main():
                         follow_ramp.reset()
                         follow_steering.reset()
                     send(ser, left, right, dump)
-                    dashboard.update(mode=mode, connected=controller is not None, outputs=[left, right, dump],
+                    dashboard.update(mode=mode, connected=controller is not None, outputs=[left, right, dump], nano=nano,
+                                     system_action=system_actions.snapshot(),
                                      controller_name=controller.name if controller else '',
                                      controller_id=controller.uniq if controller else '',
                                      teleop_ready=not resyncing and not system_actions.shutdown_pending.is_set(),
@@ -202,8 +227,11 @@ def main():
                 dashboard.update(mode='stop', connected=False, outputs=[0, 0, 0], message=str(exc))
                 print(f'Connection error: {exc}', flush=True)
             finally:
+                dashboard.actions.clear()
                 dashboard.teleop.reset()
-                dashboard.update(mode='stop', connected=False, teleop_ready=False, outputs=[0, 0, 0], message='Disconnected')
+                dashboard.update(mode='stop', connected=False, teleop_ready=False, outputs=[0, 0, 0],
+                                 nano={'available': False, 'fresh': False, 'age_s': None, 'tof_state': 'unavailable'},
+                                 message='Disconnected')
                 follower.set_enabled(False)
                 if ser is not None:
                     try:

@@ -12,6 +12,9 @@ from status_server import Dashboard, RobotStatus
 
 
 class BatteryTests(unittest.TestCase):
+    def setUp(self):
+        self.enterContext(patch('controller_battery.read_upower', return_value=None))
+
     def test_reads_only_matched_controller_and_converts_microvolts(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -93,7 +96,7 @@ class HttpTests(unittest.TestCase):
         with self.get('/camera.jpg?t=1') as response:
             self.assertEqual(response.headers['Content-Type'], 'image/jpeg')
             self.assertEqual(response.read(), b'jpeg-fixture')
-        self.follower.request_preview.assert_called_once()
+        self.follower.request_preview.assert_called_once_with(detect=True)
         self.follower.preview_jpeg.return_value = None
         with self.assertRaises(urllib.error.HTTPError) as error:
             self.get('/camera.jpg')
@@ -148,3 +151,65 @@ class HttpTests(unittest.TestCase):
         self.assertNotIn('__CONTROL_TOKEN__', page)
         with self.get('/api/status') as response:
             self.assertNotIn(self.dashboard.control_token, response.read().decode())
+
+    def test_nano_telemetry_is_exposed_without_changing_motor_requests(self):
+        self.dashboard.update(outputs=[.5, .5, 0], nano={
+            'available': True, 'fresh': True, 'age_s': .1,
+            'distance_cm': 15, 'signal': 1000, 'tof_state': 'stop',
+            'applied_outputs': [0, 0, 0], 'watchdog': False})
+        with self.get('/api/status') as response:
+            data = json.load(response)
+        self.assertEqual(data['outputs'], [.5, .5, 0])
+        self.assertEqual(data['nano']['applied_outputs'], [0, 0, 0])
+        self.assertEqual(data['nano']['distance_cm'], 15)
+        self.assertIn('temperature_c', data['pi'])
+        self.assertIn('uptime_s', data['pi'])
+
+    def page_action(self, action, confirmed=False):
+        request = urllib.request.Request(self.base + '/api/action', data=json.dumps({
+            'action': action, 'confirmed': confirmed}).encode(),
+            headers={'Origin': self.base, 'Content-Type': 'application/json',
+                     'X-Robot-Control': self.dashboard.control_token}, method='POST')
+        return urllib.request.urlopen(request, timeout=2)
+
+    def test_page_modes_require_confirmation_and_single_requires_controller(self):
+        self.dashboard.update(teleop_ready=True)
+        for action in ('manual', 'wifi_off', 'single', 'follow'):
+            with self.assertRaises(urllib.error.HTTPError) as error:
+                self.page_action(action)
+            self.assertEqual(error.exception.code, 409)
+        with self.page_action('follow', confirmed=True):
+            pass
+        self.assertEqual(self.dashboard.actions.take(), 'follow')
+
+    def test_page_shutdown_is_queued_and_stop_can_override_it(self):
+        self.dashboard.update(teleop_ready=True)
+        with self.page_action('shutdown', confirmed=True):
+            pass
+        with self.page_action('stop'):
+            pass
+        self.assertEqual(self.dashboard.actions.take(), 'stop')
+
+    def test_page_rejects_actions_when_robot_not_ready(self):
+        self.dashboard.update(teleop_ready=False)
+        with self.assertRaises(urllib.error.HTTPError):
+            self.page_action('hotspot', confirmed=True)
+
+    def test_http_dump_controls_follow_existing_enable_session(self):
+        self.dashboard.update(teleop_ready=True)
+        with self.post('enable', {}) as response:
+            owner = json.load(response)['owner']
+        for sequence, dump in enumerate((1, -1, 0), 1):
+            with self.post('command', {'owner': owner, 'sequence': sequence, 'x': 0, 'forward': 0, 'dump': dump}):
+                pass
+            self.assertEqual(self.dashboard.teleop.outputs(), (0, 0, dump))
+
+    def test_late_control_request_is_ignored_without_ending_active_session(self):
+        self.dashboard.update(teleop_ready=True)
+        with self.post('enable', {}) as response:
+            owner = json.load(response)['owner']
+        with self.post('command', {'owner': owner, 'sequence': 3, 'x': 0, 'forward': 0}) as response:
+            self.assertTrue(json.load(response)['accepted'])
+        with self.post('command', {'owner': owner, 'sequence': 2, 'x': 1, 'forward': 1}) as response:
+            self.assertFalse(json.load(response)['accepted'])
+        self.assertEqual(self.dashboard.teleop.outputs(), (0, 0, 0))

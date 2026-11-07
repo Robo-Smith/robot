@@ -36,6 +36,7 @@
 #include <Servo.h>
 #include <Adafruit_NeoPixel.h>
 #include <Wire.h>
+#include <stdio.h>
 
 byte deviceAddress = 0x10;  // The address of the TF-Luna device is 0x10
 #define PIN 10              //Neopixel is attached to  
@@ -57,6 +58,35 @@ const unsigned long commandTimeoutMs = 500;
 char commandBuffer[48];
 byte commandLength = 0;
 bool commandOverflow = false;
+unsigned long lastSensorMs = 0;
+bool sensorSeen = false;
+unsigned long lastTelemetryMs = 0;
+bool sonarTelemetryNext = false;
+const byte sonarTriggerPins[2] = {9, 12};
+const byte sonarEchoPins[2] = {8, 11};
+unsigned int sonarCm[2] = {0, 0}; // Zero means no usable echo, never zero distance.
+unsigned long sonarSampleMs[2] = {0, 0};
+bool sonarSampled[2] = {false, false};
+unsigned long lastSonarPingMs = 0;
+byte nextSonar = 0;
+
+void updateSonar() {
+  if (millis() - lastSonarPingMs < 70) return;
+  lastSonarPingMs = millis();
+  byte index = nextSonar;
+  nextSonar = 1 - nextSonar;
+  digitalWrite(sonarTriggerPins[index], LOW);
+  delayMicroseconds(2);
+  digitalWrite(sonarTriggerPins[index], HIGH);
+  delayMicroseconds(10);
+  digitalWrite(sonarTriggerPins[index], LOW);
+  // Bound each measurement to 12ms (~2m); no default one-second pulseIn wait.
+  unsigned long echoUs = pulseIn(sonarEchoPins[index], HIGH, 12000UL);
+  unsigned int cm = (unsigned int)((echoUs + 29) / 58);
+  sonarCm[index] = echoUs && cm >= 2 && cm <= 200 ? cm : 0;
+  sonarSampleMs[index] = millis();
+  sonarSampled[index] = true;
+}
 
 const int leftPwmPin = 14;  // PWM output for left joystick is 14 on yardbot - test board is 6
 const int rightPwmPin = 15; // PWM output for right joystick is 15 on yardbot - test board is 6
@@ -70,6 +100,11 @@ Servo dumpPWM;   // create servo object to control a servo
 
 
 void setup() {
+  for (byte index = 0; index < 2; index++) {
+    pinMode(sonarTriggerPins[index], OUTPUT);
+    digitalWrite(sonarTriggerPins[index], LOW);
+    pinMode(sonarEchoPins[index], INPUT);
+  }
   pixels.begin();               //INITIALIZE NeoPixel strip object (REQUIRED)
   Wire.begin();                 //The I2C bus communication starts for ToF sensor
   Serial.begin(115200);         //Start serial communication with Pi
@@ -87,6 +122,7 @@ void setup() {
   }
 
 void loop() {
+  updateSonar();
   Wire.beginTransmission(deviceAddress);  //The I2C data transmission starts
   Wire.write(0x00);                       //Send command
   Wire.endTransmission();                 //The I2C data transfer is complete
@@ -98,6 +134,8 @@ void loop() {
     for (int i = 0; i < 7; i++) {
       data[i] = Wire.read(); //Read data into an array
     }
+    lastSensorMs = millis();
+    sensorSeen = true;
     distance = (data[1] << 8) | data[0]; //Distance Value
     signalStrength = (data[3] << 8) | data[2]; //Signal Strength Signal Dist value is unreliable when Amp < 100 or Amp = 65535 (Overexposure) 
   }
@@ -125,7 +163,8 @@ void loop() {
       commandOverflow = true;
     }
   }
-  if (millis() - lastCommandMs >= commandTimeoutMs) {
+  bool watchdogStopped = millis() - lastCommandMs >= commandTimeoutMs;
+  if (watchdogStopped) {
     leftDriveCommand = rightDriveCommand = dumpCommand = 0;
   }
   int leftOutput = leftDriveCommand;
@@ -144,6 +183,30 @@ void loop() {
   leftPWM.write(90 + leftOutput * 85L / 1000);
   rightPWM.write(90 - rightOutput * 85L / 1000);
   dumpPWM.write(90 + dumpCommand * 75L / 1000);
+  // Low-rate telemetry: only enqueue a complete frame when UART space is free.
+  // Age fields saturate at 65535 ms; the packet fits the AVR's 63 usable TX bytes.
+  unsigned long now = millis();
+  if (now - lastTelemetryMs >= 100) {
+    lastTelemetryMs = now;
+    unsigned int sensorAge = sensorSeen ? (unsigned int)min(now - lastSensorMs, 65535UL) : 65535;
+    unsigned int commandAge = (unsigned int)min(now - lastCommandMs, 65535UL);
+    char telemetry[64];
+    int length;
+    if (sonarTelemetryNext) {
+      unsigned int leftAge = sonarSampled[0] ? (unsigned int)min(now - sonarSampleMs[0], 65535UL) : 65535;
+      unsigned int rightAge = sonarSampled[1] ? (unsigned int)min(now - sonarSampleMs[1], 65535UL) : 65535;
+      length = snprintf(telemetry, sizeof(telemetry), "S%u,%u,%u,%u\n",
+                        sonarCm[0], sonarCm[1], leftAge, rightAge);
+    } else {
+      length = snprintf(telemetry, sizeof(telemetry), "T%u,%u,%u,%u,%u,%d,%d,%d,%lu\n",
+                        distance, signalStrength, sensorAge, commandAge,
+                        (unsigned int)watchdogStopped, leftOutput, rightOutput, dumpCommand, now);
+    }
+    sonarTelemetryNext = !sonarTelemetryNext;
+    if (length > 0 && length < (int)sizeof(telemetry) && Serial.availableForWrite() >= length) {
+      Serial.write((const uint8_t *)telemetry, length);
+    }
+  }
   //lights
   if ((distance<=range_stop)&&(signalStrength>150)&&(signalStrength<55000)){ //Too Close - Stop
     pixels.setPixelColor(2, pixels.Color(0, 200, 0));  //green, red, blue
