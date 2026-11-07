@@ -44,9 +44,9 @@ class FollowCalibrationTests(unittest.TestCase):
                 self.assertEqual(left, right)
                 return left
             self.assertEqual(speed(256), 0)  # calibrated 1m
-            self.assertAlmostEqual(speed(192), .38)  # 25% smaller apparent width
-            self.assertAlmostEqual(speed(128), .58)  # half calibrated width
-            self.assertEqual(speed(64), .65)  # distant person reaches maximum
+            self.assertAlmostEqual(speed(192), .494)  # 25% smaller apparent width
+            self.assertAlmostEqual(speed(128), .754)  # half calibrated width
+            self.assertEqual(speed(64), .845)  # distant person reaches maximum
             self.assertGreater(speed(250), .18)
             self.assertLess(speed(250), speed(192))
 
@@ -63,7 +63,7 @@ class FollowCalibrationTests(unittest.TestCase):
             mirror = control.follow_command((110, 0, 250, 480), 640, 480)
             self.assertAlmostEqual(mirror[0], right)
             self.assertAlmostEqual(mirror[1], left)
-            self.assertLessEqual(max(abs(left), abs(right)), .65)
+            self.assertLessEqual(max(abs(left), abs(right)), .845)
             # Higher turn power must never bypass the close-person stop.
             self.assertEqual(control.follow_command((280, 0, 300, 480), 640, 480), (0, 0))
 
@@ -81,5 +81,5 @@ class FollowCalibrationTests(unittest.TestCase):
             for height in (100, 200, 280):
                 left, right = control.follow_command((x, 0, 40, height), 640, 480)
                 for value in (left, right):
-                    self.assertTrue(value == 0 or .18 <= abs(value) <= .65)
+                    self.assertTrue(value == 0 or .18 <= abs(value) <= .845)
         self.assertEqual(control.follow_command(None, 640, 480), (0, 0))

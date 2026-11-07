@@ -36,7 +36,20 @@ class ControlTests(unittest.TestCase):
     def test_sum_clamps_and_opposition_cancels(self):
         self.assertEqual(single_stick(0, 1, 0, 1), (1, 1))
         self.assertEqual(single_stick(0, 1, 0, -1), (0, 0))
-        self.assertEqual(single_stick(1, 0, 0, 0), (1, -1))
+        self.assertEqual(single_stick(1, 0, 0, 0), (.7, -.7))
+
+    def test_single_stick_steering_limit_applies_to_both_sticks(self):
+        self.assertEqual(single_stick(1, 0, 1, 0), (.7, -.7))
+        self.assertEqual(single_stick(0, 0, -1, 0), (-.7, .7))
+        self.assertEqual(single_stick(.5, 0, .5, 0), (.7, -.7))
+        self.assertEqual(single_stick(1, 0, -1, 0), (0, 0))
+
+    def test_single_stick_full_speed_turn_is_less_sharp(self):
+        left, right = single_stick(1, 1, 0, 0)
+        self.assertEqual(left, 1)
+        self.assertAlmostEqual(right, .3)
+        self.assertEqual(single_stick(0, 1, 0, 0), (1, 1))
+        self.assertEqual(single_stick(0, -1, 0, 0), (-1, -1))
 
     def test_follow_stops_on_loss_or_close_person(self):
         self.assertEqual(follow_command(None, 640, 480), (0, 0))

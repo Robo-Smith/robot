@@ -48,19 +48,28 @@ def mix(forward, turn):
     return clamp(forward + turn), clamp(forward - turn)
 
 
+SINGLE_STICK_STEERING_GAIN = 0.70
+
+
 def single_stick(left_x, left_y, right_x, right_y):
-    return mix(clamp(left_y + right_y), clamp(left_x + right_x))
+    forward = clamp(left_y + right_y)
+    # Clamp the combined input before scaling so using both sticks cannot
+    # bypass the steering limit. Keep full straight-line throttle available.
+    turn = clamp(left_x + right_x) * SINGLE_STICK_STEERING_GAIN
+    return mix(forward, turn)
 
 
 # Old height calibrations remain supported; new 1m calibrations use box width.
 FOLLOW_TARGET_SIZE = load_target_size()
 FOLLOW_SIZE_METRIC = load_size_metric()
-FOLLOW_MAX_SPEED = 0.65
+FOLLOW_SPEED_SCALE = 1.30
+FOLLOW_MAX_SPEED = 0.845
 FOLLOW_SPEED_GAIN = 0.80
-FOLLOW_MAX_WHEEL_SPEED = 0.65
+FOLLOW_MAX_WHEEL_SPEED = 0.845
 FOLLOW_MIN_TURN = 0.30
 FOLLOW_MAX_TURN = 0.40
 FOLLOW_MIN_TURN_WHEEL_SPEED = 0.28
+FOLLOW_ARC_STEERING_GAIN = 0.85  # Restore gentler steering at the faster forward speed.
 FOLLOW_MIN_WHEEL_SPEED = 0.18  # Minimum usable follow-mode wheel command.
 
 
@@ -109,7 +118,7 @@ def follow_command(box, width, height, steering_controller=None):
     stop_size = FOLLOW_TARGET_SIZE - FOLLOW_STOP_MARGIN
     relative_error = max(0.0, (stop_size - size) / stop_size)
     forward = min(FOLLOW_MAX_SPEED,
-                  FOLLOW_MIN_WHEEL_SPEED + FOLLOW_SPEED_GAIN * relative_error)
+                  FOLLOW_SPEED_SCALE * (FOLLOW_MIN_WHEEL_SPEED + FOLLOW_SPEED_GAIN * relative_error))
     pivot = steering_controller.pivot if steering_controller is not None else abs(turn) >= .70
     if pivot:
         # Retain enough torque to pivot only for a person far to one side.
@@ -119,7 +128,7 @@ def follow_command(box, width, height, steering_controller=None):
     # Keep the outside wheel powered and reduce only the inside wheel.
     outside_minimum = FOLLOW_MIN_TURN_WHEEL_SPEED if turn else FOLLOW_MIN_WHEEL_SPEED
     speed = max(outside_minimum, forward * (1 - .35 * abs(turn)))
-    inside = max(FOLLOW_MIN_WHEEL_SPEED, speed * (1 - .85 * abs(turn)))
+    inside = max(FOLLOW_MIN_WHEEL_SPEED, speed * (1 - FOLLOW_ARC_STEERING_GAIN * abs(turn)))
     speed = min(FOLLOW_MAX_WHEEL_SPEED, speed)
     return (speed, inside) if turn >= 0 else (inside, speed)
 

@@ -407,3 +407,53 @@ calibration is retained. Detection-worker logs remain stateless requested output
 the control loop also applies steering hysteresis and the motor ramp before
 sending commands. Check center tracking and large turns with wheels lifted, then
 check for oscillation on the ground; hardware dynamics are not simulated by tests.
+
+
+### Follow-mode speed increase
+
+`FOLLOW_SPEED_SCALE = 1.30` multiplies the forward speed request by 30%, and the
+forward/wheel caps are now 84.5% (previously 65%). Centered-person requests of
+38% and 58% become 49.4% and 75.4%. Pivot power, steering thresholds, motor
+minimum constants, acceleration/deceleration rates, and immediate stops retain
+their existing values. Actual ground speed depends on motor response and load.
+Update `robot_control.py` and restart robot.service; calibration and Nano firmware
+remain valid. Check stopping distance and tracking response at the higher speed.
+
+
+### Faster follow steering
+
+Pivot commands now span 39–52% instead of 30–40%, and the turning minimum is
+36.4% instead of 28% (30% increases). The forward-arc differential gain is
+1.105 instead of 0.85, giving 30% stronger wheel-speed differences until motor
+minimums limit them. Ordinary arcs still keep both wheels forward. Center
+hysteresis, steering release, ramps, and safety stops retain their behavior.
+Update `robot_control.py` and restart robot.service. Watch for renewed overshoot
+when checking the faster steering on the robot.
+
+
+## Single-stick steering adjustment
+
+Single-stick mode now scales the summed/clamped horizontal joystick input by
+`SINGLE_STICK_STEERING_GAIN = 0.70`, reducing the steering request by 30%.
+Full turn at rest requests +70%/-70%; combining both sticks cannot exceed this
+steering limit. Forward/reverse throttle retains its full range, and manual,
+follow, and dump control are unaffected. Mixing still clips individual wheels
+at full scale, so the change in wheel-speed difference at full throttle depends
+on saturation; this is a steering-input reduction, not a guaranteed 30% reduction
+in physical yaw rate.
+
+Update `robot_control.py` and restart robot.service. Possible later refinements
+are a curved steering response for gentler center corrections, reduced steering
+gain at high throttle, and acceleration ramps for single-stick mode. Evaluate the
+new gain first before combining additional changes.
+
+
+### Follow steering overshoot at higher forward speed
+
+Follow steering has been restored to its pre-boost settings: 30–40% pivot
+commands, 28% turning minimum, and 0.85 arc differential gain. This removes the
+later 30% steering boost (about 23% lower than the boosted requests), while keeping
+`FOLLOW_SPEED_SCALE = 1.30` and the 84.5% forward/wheel caps. Center hysteresis,
+steering release, ramps, calibrated spacing, and single-stick settings retain
+their behavior. Update `robot_control.py` and restart robot.service; check steering
+on the robot because software tests do not measure actual overshoot.
