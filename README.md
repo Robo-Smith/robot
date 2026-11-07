@@ -460,7 +460,7 @@ on the robot because software tests do not measure actual overshoot.
 
 ## Self-hosted robot status page
 
-`Pi.py` now starts a read-only dashboard on port **8080** in the same process as
+`Pi.py` now starts a status dashboard on port **8080** in the same process as
 the controller. From a phone/computer on the robot's network, open:
 
 ```text
@@ -523,7 +523,7 @@ Environment=ROBOT_STATUS_PORT=8081
 
 Then restart robot.service. For a terminal test: `ROBOT_STATUS_PORT=8081
 /usr/bin/python3 Pi.py` (on one line), with robot.service stopped first.
-The dashboard is read-only and has no web control/shutdown endpoints. It is
+The dashboard has explicitly enabled tele-operation endpoints; shutdown remains controller-only. It is
 intended for a trusted local network: anyone on that network who can reach the
 port can view the feed and telemetry. It has no authentication or HTTPS; do not
 forward this port to the public internet. No external scripts, fonts or services
@@ -605,3 +605,48 @@ still need a field test. Automated tests cover profile security, no activation
 at setup, toggling, restoring the remembered home connection across service
 restarts, temporary-secret cleanup, and restoring the previous radio/connection
 when activation fails. These tests never change real network state.
+
+
+## Web tele-operation
+
+The dashboard now includes an explicit **Tele-operate** mode, available over the
+home LAN or YardBot hotspot. It works without a connected Stadia controller.
+Hold **Hold 1 second to enable** for a full second, then pick up the center of the
+on-screen joystick and drag. A short enable tap or a tap on the joystick rim does
+not drive. Touch and mouse are supported. Up/down controls forward/reverse and
+left/right uses the same 70% steering gain as physical single-stick mode. Web
+wheel commands are limited to 65%; the dump motor remains neutral.
+
+Release the joystick to command zero while staying enabled. **Disable & stop web
+driving**, Escape, page focus loss, hiding the tab, or leaving the page disables
+the control session. On a phone the enabled layout prioritizes camera + joystick
+and hides secondary telemetry until web driving is disabled. Only one browser
+can hold control at a time. Another browser can still view status and camera.
+
+Browser commands heartbeat every 100 ms. The server revokes the lease after
+400 ms without a valid heartbeat and the motor loop stops on its next 50 ms tick.
+A late command cannot reactivate an expired session: enable again explicitly.
+Increasing sequence numbers reject delayed/out-of-order movement after a stop.
+The Nano's independent serial watchdog and TF-Luna forward obstacle checks remain
+active. Commands are not ramped; joystick release and disable stop immediately.
+
+Stadia **A/B/X/Y** revokes browser control and selects that physical mode. Physical
+axis/trigger inputs are ignored while web control is active. Shutdown and serial
+or controller errors also revoke web control. A newly connected Stadia controller
+does not automatically take over from an enabled browser; select a mode with a
+button. Without Stadia, the robot starts stopped and can be enabled on the page.
+Expired or disabled web control returns to stop, not an earlier driving mode.
+
+The HTTP control endpoints require the page's request token and a matching
+same-origin header. This prevents cross-site form commands; it is not user
+account authentication. Anyone who can load this dashboard on your trusted LAN
+or password-protected hotspot can deliberately enable driving. Keep it off the
+public internet. The web page cannot activate hotspot, change Wi-Fi or shut down
+the Pi. Tele-operation tokens are per-session and not stored on disk.
+
+Deploy updated `Pi.py`, `status_server.py`, `web/index.html`, new `teleop.py`, and
+`web/teleop.js`, then restart robot.service and reload the browser page. No Arduino
+update or calibration is needed. Start with wheels lifted: verify short taps do
+nothing, enable/drag/release, disable, physical X override, tab hiding, and loss of
+Wi-Fi stop the robot. Software tests mock motors and camera; actual phone/browser
+and radio behavior still require robot testing.

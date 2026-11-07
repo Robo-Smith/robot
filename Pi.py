@@ -57,28 +57,58 @@ def main():
             controller = ser = None
             try:
                 dashboard.update(mode='stop', connected=False, outputs=[0, 0, 0],
-                                 controller_name='', controller_id='', message='Waiting for controller')
-                controller = find_stadia_controller()
+                                 controller_name='', controller_id='', teleop_ready=False, message='Connecting to Nano')
                 ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=0, write_timeout=0.1)
                 time.sleep(2)  # Nano resets when the serial port opens.
                 send(ser)
-                mode = 'manual'
+                try:
+                    controller = find_stadia_controller()
+                except RuntimeError:
+                    controller = None
+                mode = 'manual' if controller else 'stop'
+                next_controller_scan = time.monotonic() + 1
                 axes = {}  # Require fresh input after reconnecting.
                 resyncing = False
                 holds = DpadHolds()
                 follow_ramp = FollowRamp()
                 follow_steering = FollowSteering()
-                dashboard.update(mode=mode, connected=True, controller_name=controller.name,
-                                 controller_id=controller.uniq, message='Ready')
-                print('Connected; mode: manual', flush=True)
+                dashboard.update(mode=mode, connected=controller is not None,
+                                 controller_name=controller.name if controller else '',
+                                 controller_id=controller.uniq if controller else '',
+                                 teleop_ready=True, message='Ready')
+                print(f'Nano connected; mode: {mode}', flush=True)
                 next_tick = time.monotonic()
                 while True:
-                    ready, _, _ = select.select([controller], [], [], max(0, next_tick - time.monotonic()))
+                    if controller is None and time.monotonic() >= next_controller_scan:
+                        next_controller_scan = time.monotonic() + 1
+                        try:
+                            controller = find_stadia_controller()
+                            print('Stadia connected; select a mode to drive', flush=True)
+                        except RuntimeError:
+                            pass
+                    ready, _, _ = select.select([controller] if controller else [], [], [],
+                                                max(0, next_tick - time.monotonic()))
                     if ready:
-                        for event in controller.read():
+                        try:
+                            events = list(controller.read())
+                        except OSError:
+                            send(ser)
+                            dashboard.teleop.reset()
+                            controller.close()
+                            controller = None
+                            axes.clear()
+                            holds.reset(require_release=True)
+                            resyncing = False
+                            follow_ramp.reset()
+                            follow_steering.reset()
+                            mode = 'stop'
+                            follower.set_enabled(False)
+                            continue
+                        for event in events:
                             if event.type == evdev.ecodes.EV_SYN and event.code == evdev.ecodes.SYN_DROPPED:
                                 send(ser)
                                 mode = 'stop'
+                                dashboard.teleop.reset()
                                 follow_ramp.reset()
                                 follow_steering.reset()
                                 axes.clear()
@@ -109,6 +139,7 @@ def main():
                             if system_actions.shutdown_pending.is_set():
                                 continue
                             if event.type == evdev.ecodes.EV_KEY and event.value == 1 and event.code in BUTTON_MODES:
+                                dashboard.teleop.reset()
                                 mode = BUTTON_MODES[event.code]
                                 follow_ramp.reset()
                                 follow_steering.reset()
@@ -126,17 +157,33 @@ def main():
                         if action == 'shutdown':
                             send(ser)
                             mode = 'stop'
+                            dashboard.teleop.reset()
                             follower.set_enabled(False)
                         system_actions.submit(action)
                     if system_actions.shutdown_pending.is_set():
                         mode = 'stop'
+                        dashboard.teleop.reset()
                         follower.set_enabled(False)
+                    web_outputs = dashboard.teleop.outputs()
+                    if dashboard.teleop.take_stop():
+                        mode = 'stop'
+                        follower.set_enabled(False)
+                        web_outputs = None
+                    if web_outputs is not None and not resyncing and not system_actions.shutdown_pending.is_set():
+                        mode = 'teleop'
+                        follower.set_enabled(False)
+                    elif mode == 'teleop':
+                        mode = 'stop'
                     get = lambda code: axes.get(code, 0.0)
                     left, right, dump = controller_command(mode,
                         get(evdev.ecodes.ABS_X), -get(evdev.ecodes.ABS_Y),
                         get(evdev.ecodes.ABS_Z), -get(evdev.ecodes.ABS_RZ),
                         get(evdev.ecodes.ABS_BRAKE), get(evdev.ecodes.ABS_GAS))
-                    if mode == 'follow':
+                    if mode == 'teleop':
+                        left, right, dump = web_outputs
+                        follow_ramp.reset()
+                        follow_steering.reset()
+                    elif mode == 'follow':
                         box, width, height = follower.detection()
                         left, right = follow_command(box, width, height, follow_steering)
                         left, right = follow_ramp.update(left, right, time.monotonic(),
@@ -145,14 +192,18 @@ def main():
                         follow_ramp.reset()
                         follow_steering.reset()
                     send(ser, left, right, dump)
-                    dashboard.update(mode=mode, connected=True, outputs=[left, right, dump],
+                    dashboard.update(mode=mode, connected=controller is not None, outputs=[left, right, dump],
+                                     controller_name=controller.name if controller else '',
+                                     controller_id=controller.uniq if controller else '',
+                                     teleop_ready=not resyncing and not system_actions.shutdown_pending.is_set(),
                                      message=('Shutting down' if system_actions.shutdown_pending.is_set() else
                                               'Controller resynchronizing' if resyncing else 'Ready'))
             except (OSError, RuntimeError, serial.SerialException) as exc:
                 dashboard.update(mode='stop', connected=False, outputs=[0, 0, 0], message=str(exc))
                 print(f'Connection error: {exc}', flush=True)
             finally:
-                dashboard.update(mode='stop', connected=False, outputs=[0, 0, 0], message='Disconnected')
+                dashboard.teleop.reset()
+                dashboard.update(mode='stop', connected=False, teleop_ready=False, outputs=[0, 0, 0], message='Disconnected')
                 follower.set_enabled(False)
                 if ser is not None:
                     try:

@@ -1,6 +1,7 @@
-"""Read-only LAN dashboard. No web endpoint changes robot or network state."""
+"""LAN dashboard with explicit, leased web driving."""
 import json
 import os
+import secrets
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import threading
@@ -8,6 +9,7 @@ import time
 from urllib.parse import urlsplit
 
 from controller_battery import read_battery
+from teleop import Teleop
 
 PAGE = Path(__file__).resolve().parent / 'web' / 'index.html'
 
@@ -18,7 +20,7 @@ class RobotStatus:
         self.changed = time.monotonic()
         self.data = {'mode': 'stop', 'connected': False, 'controller_name': '',
                      'controller_id': '', 'message': 'Waiting for controller',
-                     'outputs': [0, 0, 0]}
+                     'outputs': [0, 0, 0], 'teleop_ready': False}
 
     def update(self, **values):
         with self.lock:
@@ -37,6 +39,8 @@ class RobotStatus:
 class Dashboard:
     def __init__(self, follower, host='0.0.0.0', port=8080):
         self.state = RobotStatus()
+        self.teleop = Teleop()
+        self.control_token = secrets.token_urlsafe(32)
         self.follower = follower
         self.server = None
         self.battery_lock = threading.Lock()
@@ -49,7 +53,9 @@ class Dashboard:
                 def do_GET(self):
                     path = urlsplit(self.path).path
                     if path == '/':
-                        self.reply(200, 'text/html; charset=utf-8', PAGE.read_bytes())
+                        self.reply(200, 'text/html; charset=utf-8', PAGE.read_text().replace('__CONTROL_TOKEN__', dashboard.control_token).encode())
+                    elif path == '/teleop.js':
+                        self.reply(200, 'text/javascript; charset=utf-8', (PAGE.parent / 'teleop.js').read_bytes())
                     elif path == '/api/status':
                         self.reply(200, 'application/json', json.dumps(dashboard.snapshot()).encode())
                     elif path == '/camera.jpg':
@@ -61,6 +67,44 @@ class Dashboard:
                             self.reply(200, 'image/jpeg', jpeg)
                     else:
                         self.reply(404, 'text/plain', b'Not found')
+
+                def do_POST(self):
+                    # Custom header + same-origin checks prevent cross-site form control.
+                    origin = urlsplit(self.headers.get('Origin', ''))
+                    if (origin.scheme not in ('http', 'https') or origin.netloc != self.headers.get('Host')
+                            or not self.headers.get('X-Robot-Control', '').isascii()
+                            or not secrets.compare_digest(self.headers.get('X-Robot-Control', ''), dashboard.control_token)):
+                        self.reply(403, 'text/plain', b'Control requires the robot dashboard')
+                        return
+                    path = urlsplit(self.path).path
+                    if path not in ('/api/teleop/enable', '/api/teleop/command', '/api/teleop/disable'):
+                        self.reply(404, 'text/plain', b'Not found')
+                        return
+                    try:
+                        length = int(self.headers.get('Content-Length', '0'))
+                        if not 0 < length <= 1024:
+                            raise ValueError('Invalid request size')
+                        self.connection.settimeout(2)
+                        data = json.loads(self.rfile.read(length))
+                        if not isinstance(data, dict):
+                            raise ValueError('Expected object')
+                        if path.endswith('/disable'):
+                            dashboard.teleop.disable(data.get('owner', ''))
+                            result = {'enabled': False}
+                        else:
+                            state = dashboard.state.snapshot()
+                            if not state['live'] or not state['teleop_ready']:
+                                dashboard.teleop.reset()
+                                raise ValueError('Robot is not ready for web driving')
+                            if path.endswith('/enable'):
+                                result = {'owner': dashboard.teleop.enable(), 'enabled': True}
+                            else:
+                                dashboard.teleop.command(data.get('owner', ''), data.get('sequence'),
+                                                         data.get('x'), data.get('forward'))
+                                result = {'enabled': True}
+                        self.reply(200, 'application/json', json.dumps(result).encode())
+                    except (ValueError, TypeError, TimeoutError) as exc:
+                        self.reply(409, 'text/plain', str(exc).encode())
 
                 def reply(self, code, content_type, body):
                     try:
@@ -95,6 +139,7 @@ class Dashboard:
             data['battery'] = dict(self.battery)
         data.pop('controller_id', None)
         data['camera'] = self.follower.camera_status()
+        data['teleop_active'] = self.teleop.active()
         return data
 
     def close(self):

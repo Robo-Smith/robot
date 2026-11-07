@@ -107,4 +107,44 @@ class HttpTests(unittest.TestCase):
         request = urllib.request.Request(self.base + '/api/status', data=b'{}', method='POST')
         with self.assertRaises(urllib.error.HTTPError) as error:
             urllib.request.urlopen(request, timeout=2)
-        self.assertEqual(error.exception.code, 501)
+        self.assertEqual(error.exception.code, 403)
+
+    def post(self, action, body, origin=True, token=True):
+        headers = {'Content-Type': 'application/json'}
+        if origin:
+            headers['Origin'] = self.base
+        if token:
+            headers['X-Robot-Control'] = self.dashboard.control_token
+        request = urllib.request.Request(self.base + '/api/teleop/' + action,
+                                         data=json.dumps(body).encode(), headers=headers, method='POST')
+        return urllib.request.urlopen(request, timeout=2)
+
+    def test_teleop_requires_same_origin_token_and_ready_robot(self):
+        self.dashboard.update(teleop_ready=True)
+        for origin, token in ((False, True), (True, False)):
+            with self.assertRaises(urllib.error.HTTPError) as error:
+                self.post('enable', {}, origin, token)
+            self.assertEqual(error.exception.code, 403)
+        self.dashboard.update(teleop_ready=False)
+        with self.assertRaises(urllib.error.HTTPError) as error:
+            self.post('enable', {})
+        self.assertEqual(error.exception.code, 409)
+
+    def test_enable_command_disable_without_stadia(self):
+        self.dashboard.update(teleop_ready=True, connected=False)
+        with self.post('enable', {}) as response:
+            owner = json.load(response)['owner']
+        with self.post('command', {'owner': owner, 'sequence': 1, 'x': 0, 'forward': 1}):
+            pass
+        self.assertEqual(self.dashboard.teleop.outputs(), (.65, .65, 0))
+        with self.post('disable', {'owner': owner}):
+            pass
+        self.assertIsNone(self.dashboard.teleop.outputs())
+
+    def test_session_token_is_not_in_status_and_page_has_request_token(self):
+        with self.get('/') as response:
+            page = response.read().decode()
+        self.assertIn(self.dashboard.control_token, page)
+        self.assertNotIn('__CONTROL_TOKEN__', page)
+        with self.get('/api/status') as response:
+            self.assertNotIn(self.dashboard.control_token, response.read().decode())
