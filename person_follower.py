@@ -19,74 +19,150 @@ def detect_people(detector, frame):
 
 
 class PersonFollower:
+    """Own the camera once; serve preview frames without a second camera client."""
     def __init__(self):
         self.lock = threading.Lock()
         self.latest = (0.0, None, 640, 480)
         self.enabled_since = float("inf")
         self.enabled = threading.Event()
-        threading.Thread(target=self._run, daemon=True).start()
+        self.wake = threading.Event()
+        self.stopping = threading.Event()
+        self.preview_until = 0.0
+        self.jpeg = None
+        self.jpeg_time = 0.0
+        self.state = 'idle'
+        self.error = ''
+        self.worker = threading.Thread(target=self._run, daemon=True)
+        self.worker.start()
 
     def set_enabled(self, enabled):
-        self.enabled_since = time.monotonic() if enabled else float("inf")
-        if enabled:
-            self.enabled.set()
-        else:
-            self.enabled.clear()
         with self.lock:
+            self.enabled_since = time.monotonic() if enabled else float("inf")
             self.latest = (0.0, None, 640, 480)
+            if enabled:
+                self.enabled.set()
+            else:
+                self.enabled.clear()
+        self.wake.set()
 
     def detection(self):
         with self.lock:
             timestamp, box, width, height = self.latest
-        if timestamp < self.enabled_since or time.monotonic() - timestamp > 0.5:
+            enabled_since = self.enabled_since
+        if timestamp < enabled_since or time.monotonic() - timestamp > 0.5:
             box = None
         return box, width, height
 
+    def request_preview(self):
+        with self.lock:
+            self.preview_until = time.monotonic() + 3.0
+        self.wake.set()
+
+    def preview_jpeg(self):
+        with self.lock:
+            return self.jpeg if time.monotonic() - self.jpeg_time < 2.0 else None
+
+    def camera_status(self):
+        with self.lock:
+            timestamp, box, _, _ = self.latest
+            fresh = timestamp >= self.enabled_since and time.monotonic() - timestamp <= .5
+            return {'state': self.state, 'error': self.error,
+                    'person_detected': box is not None and fresh}
+
+    def close(self):
+        self.stopping.set()
+        self.wake.set()
+        if self.worker.is_alive():
+            self.worker.join(timeout=1)
+
     def _run(self):
-        camera = None
+        camera = detector = None
+        camera_retry = detector_retry = 0.0
+        last_report = 0.0
         try:
-            # Manual, stop and single-stick need no camera packages or hardware.
-            self.enabled.wait()
-            from picamera2 import Picamera2
-            detector = PersonDetector()
-            camera = Picamera2()
-            configure_camera(camera)
-            camera.start()
-            print("Follow camera started: MobileNet-SSD, confidence >=70%, 640x480; stand with your full body in view", flush=True)
-            last_report = 0.0
-            while True:
-                self.enabled.wait()
-                started = time.monotonic()
-                frame = camera.capture_array()
-                boxes, weights = detect_people(detector, frame)
-                # Initial policy: choose the largest detected person.
-                box = max(boxes, key=lambda b: b[2] * b[3], default=None)
+            while not self.stopping.is_set():
                 with self.lock:
-                    self.latest = (started, box, frame.shape[1], frame.shape[0])
-                finished = time.monotonic()
-                if self.enabled.is_set() and finished - last_report >= 1.0:
-                    elapsed = finished - started
-                    height, width = frame.shape[:2]
-                    if started < self.enabled_since:
-                        reason = "waiting for a frame from this mode selection"
-                        left = right = 0.0
-                    elif elapsed > 0.5:
-                        reason = "result stale (>500ms); drive stopped"
-                        left = right = 0.0
-                    elif box is None:
-                        reason = "no person detected; drive stopped"
-                        left = right = 0.0
-                    else:
-                        left, right = follow_command(box, width, height)
-                        size = box[2] / width if FOLLOW_SIZE_METRIC == 'width' else box[3] / height
-                        reason = f"person {FOLLOW_SIZE_METRIC}={size:.2f} of image"
-                        if left == 0 and right == 0:
-                            reason += "; at/inside target distance"
-                    print(f"Follow: {elapsed * 1000:.0f}ms, {len(boxes)} person(s), "
-                          f"{reason}, requested L={left:.2f} R={right:.2f}", flush=True)
-                    last_report = finished
-        except Exception as exc:
-            print(f"Follow camera unavailable; follow mode will stop: {exc}", flush=True)
+                    preview = time.monotonic() < self.preview_until
+                following = self.enabled.is_set()
+                if not following and not preview:
+                    with self.lock:
+                        self.state = 'idle'
+                    self.wake.wait(.25)
+                    self.wake.clear()
+                    continue
+                if time.monotonic() < camera_retry:
+                    self.stopping.wait(.2)
+                    continue
+                try:
+                    import cv2
+                    if camera is None:
+                        from picamera2 import Picamera2
+                        with self.lock:
+                            self.state = 'starting'
+                        camera = Picamera2()
+                        configure_camera(camera)
+                        camera.start()
+                        print('Shared camera started: 640x480 preview / follow', flush=True)
+                    started = time.monotonic()
+                    frame = camera.capture_array()
+                    boxes = []
+                    detection_error = ''
+                    if following:
+                        try:
+                            if detector is None and started >= detector_retry:
+                                detector = PersonDetector()
+                            if detector is not None:
+                                boxes, _ = detect_people(detector, frame)
+                        except Exception as exc:
+                            detector = None
+                            detector_retry = time.monotonic() + 5
+                            detection_error = f'Person detection unavailable: {exc}'
+                            print(detection_error, flush=True)
+                        if detector is None and not detection_error:
+                            detection_error = 'Person detector waiting to retry; follow stopped'
+                        box = max(boxes, key=lambda value: value[2] * value[3], default=None)
+                        with self.lock:
+                            self.latest = (started, box, frame.shape[1], frame.shape[0])
+                        if time.monotonic() - last_report >= 1.0:
+                            elapsed = time.monotonic() - started
+                            left, right = follow_command(box, frame.shape[1], frame.shape[0])
+                            if elapsed > .5:
+                                reason = 'result stale (>500ms); drive stopped'
+                                left = right = 0
+                            elif box is None:
+                                reason = 'no person detected; drive stopped'
+                            else:
+                                size = box[2] / frame.shape[1] if FOLLOW_SIZE_METRIC == 'width' else box[3] / frame.shape[0]
+                                reason = f'person {FOLLOW_SIZE_METRIC}={size:.2f} of image'
+                                if left == 0 and right == 0:
+                                    reason += '; at/inside target distance'
+                            print(f'Follow: {elapsed * 1000:.0f}ms, {len(boxes)} person(s), '
+                                  f'{reason}, requested L={left:.2f} R={right:.2f}', flush=True)
+                            last_report = time.monotonic()
+                    if preview and time.monotonic() - self.jpeg_time >= .2:
+                        ok, encoded = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
+                        if ok:
+                            with self.lock:
+                                self.jpeg, self.jpeg_time = encoded.tobytes(), started
+                    with self.lock:
+                        self.state = 'following' if following else 'preview'
+                        self.error = detection_error
+                    if not following:
+                        self.stopping.wait(.15)
+                except Exception as exc:
+                    with self.lock:
+                        self.error = f'Camera unavailable: {exc}'
+                        self.state = 'error'
+                        self.latest = (0.0, None, 640, 480)
+                        self.jpeg = None
+                    print(self.error, flush=True)
+                    if camera is not None:
+                        try:
+                            camera.close()
+                        except Exception:
+                            pass
+                        camera = None
+                    camera_retry = time.monotonic() + 5
         finally:
             if camera is not None:
                 camera.close()

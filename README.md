@@ -328,7 +328,7 @@ In any drive mode, hold exactly one direction continuously for three seconds:
 | --- | --- |
 | Down | Stop all motors and request Pi shutdown |
 | Right | Toggle the Wi-Fi radio off/on according to its current state |
-| Left | Log a hotspot request (placeholder; no network changes yet) |
+| Left | Toggle the password-protected YardBot hotspot |
 
 Short holds and diagonals cancel. Each action fires once per hold; release and
 hold again to repeat. Wi-Fi toggling leaves Bluetooth available for controller
@@ -457,3 +457,151 @@ later 30% steering boost (about 23% lower than the boosted requests), while keep
 steering release, ramps, calibrated spacing, and single-stick settings retain
 their behavior. Update `robot_control.py` and restart robot.service; check steering
 on the robot because software tests do not measure actual overshoot.
+
+## Self-hosted robot status page
+
+`Pi.py` now starts a read-only dashboard on port **8080** in the same process as
+the controller. From a phone/computer on the robot's network, open:
+
+```text
+http://YardBot.local:8080
+```
+
+If your network does not resolve `.local`, run `hostname -I` on the Pi and use
+`http://<PI-IP-ADDRESS>:8080` (for example `http://192.168.1.42:8080`). This works
+with the current Wi-Fi or Ethernet connection; hotspot setup is still a future
+feature. Turning Wi-Fi off disconnects Wi-Fi clients from this page too.
+
+Deploy updated `Pi.py` and `person_follower.py`, add `status_server.py` and
+`controller_battery.py`, and copy the **web/** directory (including index.html)
+beside them. Existing model/control modules must remain present. Restart with:
+
+```sh
+sudo systemctl restart robot.service
+```
+
+No service-file, Arduino firmware, calibration, or additional web framework install
+is required. The existing OpenCV/Picamera2 packages provide camera support. If the
+port is occupied, the robot logs the error and continues controller operation.
+
+The responsive page shows current mode, controller connection, requested motor
+outputs, battery telemetry when available, and a live camera feed. Status refreshes
+once per second. Camera JPEGs refresh up to four times per second; a single shared
+encoder caps image production at five frames per second. Pause feed stops requests,
+and background browser tabs also stop asking for frames. With no viewers, preview
+processing expires after three seconds. Follow detection continues independently
+while follow mode is selected. The camera is opened only by the shared camera
+worker, never by HTTP handlers, avoiding the earlier camera-in-use conflict.
+Preview can work in manual/stop modes and without downloaded person models. A
+preview request does **not** enable follow mode or send any motor commands.
+The worker retains camera ownership while idle; stop robot.service before running
+standalone camera diagnostics or calibration, as before. Camera and detector
+errors are displayed and retried every five seconds. Stale preview images are
+not served; a stalled robot heartbeat is displayed as unknown, not live telemetry.
+
+### Controller battery versus voltage
+
+The page reads `/sys/class/power_supply` for the connected Stadia controller using
+its Bluetooth identity (or Stadia name when no identity is available). It shows
+capacity if Linux exposes `capacity` and volts if it exposes `voltage_now` (the
+kernel reports microvolts). Percentage is never converted into an estimated
+voltage. Unsupported fields say **Not reported**; this depends on the controller
+and driver. It does not measure robot battery or motor-controller supply voltage.
+That would require voltage-sensing hardware and additional Nano telemetry.
+See the [Linux power-supply ABI](https://github.com/torvalds/linux/blob/master/Documentation/ABI/testing/sysfs-class-power).
+
+### Server settings
+
+Defaults: `ROBOT_STATUS_HOST=0.0.0.0`, `ROBOT_STATUS_PORT=8080`. Port `0` disables
+the web server. To change them for the service, use `sudo systemctl edit
+robot.service` and add, for example:
+
+```ini
+[Service]
+Environment=ROBOT_STATUS_PORT=8081
+```
+
+Then restart robot.service. For a terminal test: `ROBOT_STATUS_PORT=8081
+/usr/bin/python3 Pi.py` (on one line), with robot.service stopped first.
+The dashboard is read-only and has no web control/shutdown endpoints. It is
+intended for a trusted local network: anyone on that network who can reach the
+port can view the feed and telemetry. It has no authentication or HTTPS; do not
+forward this port to the public internet. No external scripts, fonts or services
+are needed by the page. Hotspot mode will use the same server once configured.
+
+Verification includes loopback HTTP routes, mode updates, stale heartbeat handling,
+shared camera ownership, preview isolation from autonomous mode, and conditional
+battery/voltage parsing. Tests mock camera/controller/motor hardware. Real phone
+layout and Pi streaming performance should be checked on the robot, especially
+while follow mode is active.
+
+
+## YardBot hotspot / field network
+
+D-pad **left held for three seconds** now toggles a password-protected hotspot.
+The Pi's Wi-Fi adapter was checked for AP support and an inactive profile was
+prepared on this Pi. No active network was switched during setup. The profile
+uses 2.4 GHz, WPA2-PSK/CCMP, no WPS, DHCP via NetworkManager, and fixed Pi address
+**10.42.0.1**. It does not autoconnect on reboot; enter it explicitly with left.
+
+Update `controller_actions.py` and add `hotspot.py` beside it, then restart:
+
+```sh
+sudo systemctl restart robot.service
+```
+
+On this Pi, obtain the generated credentials in your own terminal:
+
+```sh
+cd ~/robot
+sudo /usr/bin/python3 hotspot.py --show-password
+```
+
+1. Save the displayed password before disconnecting from your home network.
+2. Hold D-pad left for three seconds. The Pi leaves its current Wi-Fi and hosts
+   the **YardBot** network. Bluetooth robot control continues independently.
+3. Join YardBot from your phone/computer with the generated password.
+4. If the device reports **No internet**, choose to stay connected. An internet
+   connection is not required for robot control, the camera, or the dashboard.
+5. Open **http://10.42.0.1:8080** in the browser (type the full address).
+6. Release, then hold left for three seconds again to stop the hotspot and restore
+   the previously active Wi-Fi profile. If it is out of range, restoration may
+   fail; left can activate the hotspot again. Right still toggles the Wi-Fi radio.
+
+The single onboard Wi-Fi adapter switches between client and access-point use;
+it does not simultaneously stay connected to home/public Wi-Fi. The dashboard
+is already bound to all interfaces, so no separate web service or camera process
+is needed. The local robot network works away from home without joining a public
+network. If Ethernet provides internet, NetworkManager's shared mode may share it;
+internet access is not required or guaranteed. Existing public/saved Wi-Fi profiles
+are not deleted or changed by this feature.
+
+Credentials, the owned profile UUID, and previous Wi-Fi UUID are persisted in
+`hotspot_settings.json` (mode 600, excluded from Git). Never commit or publish that
+file. The Wi-Fi secret is supplied to nmcli via a private, short-lived password
+file, not shell arguments or normal logs. It is not exposed by the dashboard.
+The hotspot is not started automatically when robot.service starts. It continues
+if only the Python service restarts, because NetworkManager owns the connection;
+left can still exit it after the service restarts. Reboot returns to normal saved
+Wi-Fi behavior (unless the radio was left disabled).
+
+For a fresh installation on another Pi, prepare without disconnecting Wi-Fi:
+
+```sh
+cd ~/robot
+sudo /usr/bin/python3 hotspot.py --setup
+sudo /usr/bin/python3 hotspot.py --show-password
+```
+
+NetworkManager and dnsmasq are required; this Pi already has both. If shared-mode
+activation reports a missing dnsmasq binary on another installation, install
+`dnsmasq-base` using apt. The default adapter is wlan0; settings can be adjusted
+before the initial setup on other hardware. Keep the credential file private.
+Configuration follows the [NetworkManager connection settings](https://networkmanager.pages.freedesktop.org/NetworkManager/NetworkManager/nm-settings-nmcli.html)
+and [nmcli activation/password-file documentation](https://networkmanager.pages.freedesktop.org/NetworkManager/NetworkManager/nmcli.html).
+
+Actual hotspot activation, phone association, DHCP, and streaming in hotspot mode
+still need a field test. Automated tests cover profile security, no activation
+at setup, toggling, restoring the remembered home connection across service
+restarts, temporary-secret cleanup, and restoring the previous radio/connection
+when activation fails. These tests never change real network state.

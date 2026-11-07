@@ -5,3 +5,7 @@ __pycache__/
 
 # Per-robot camera spacing calibration
 follow_settings.json
+
+# Per-robot hotspot credentials (never commit)
+hotspot_settings.json
+.hotspot-*

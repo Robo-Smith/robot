@@ -76,9 +76,11 @@ class SystemActionTests(unittest.TestCase):
         self.run_action('wifi', command)
         self.assertEqual(command.call_count, 1)
 
-    def test_hotspot_placeholder_never_runs_a_command(self):
+    def test_hotspot_dispatches_to_network_manager(self):
         command = Mock()
-        self.run_action('hotspot', command)
+        with patch('controller_actions.Hotspot') as hotspot:
+            self.run_action('hotspot', command)
+            hotspot.return_value.toggle.assert_called_once()
         command.assert_not_called()
 
     def test_shutdown_failure_releases_pending_state(self):

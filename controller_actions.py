@@ -3,6 +3,8 @@ import os
 import subprocess
 import threading
 
+from hotspot import Hotspot
+
 
 class DpadHolds:
     """Require one direction continuously; diagonals cancel, repeats do not rearm."""
@@ -80,10 +82,10 @@ class SystemActions:
                 self._command(['nmcli', '--wait', '10', 'radio', 'wifi', target])
                 print(f'Wi-Fi turned {target}', flush=True)
             elif action == 'hotspot':
-                print('Hotspot requested: placeholder only; network configuration unchanged', flush=True)
+                Hotspot().toggle()
             else:
                 raise ValueError(f'Unknown system action: {action}')
-        except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
             detail = getattr(exc, 'stderr', None) or str(exc)
             print(f'System action {action} failed: {detail.strip()}', flush=True)
             if action == 'shutdown':

@@ -28,7 +28,7 @@ class RecoveryTests(unittest.TestCase):
         with patch.object(Pi, 'find_stadia_controller', return_value=controller), \
              patch.object(Pi.serial, 'Serial', return_value=serial) as connect, \
              patch.object(Pi, 'PersonFollower', return_value=follower), \
-             patch.object(Pi.signal, 'signal'), patch.object(Pi.time, 'sleep'), \
+             patch.object(Pi, 'start_dashboard'), patch.object(Pi.signal, 'signal'), patch.object(Pi.time, 'sleep'), \
              patch.object(Pi.select, 'select', side_effect=[([controller], [], []), KeyboardInterrupt]), \
              contextlib.redirect_stdout(output):
             with self.assertRaises(KeyboardInterrupt):
@@ -73,7 +73,7 @@ class RecoveryTests(unittest.TestCase):
              patch.object(Pi.serial, 'Serial', return_value=ser), \
              patch.object(Pi, 'PersonFollower', return_value=follower), \
              patch.object(Pi, 'SystemActions', return_value=actions), \
-             patch.object(Pi.signal, 'signal'), patch.object(Pi.time, 'sleep'), \
+             patch.object(Pi, 'start_dashboard'), patch.object(Pi.signal, 'signal'), patch.object(Pi.time, 'sleep'), \
              patch.object(Pi.time, 'monotonic', side_effect=lambda: now[0]), \
              patch.object(Pi.select, 'select', side_effect=select), \
              contextlib.redirect_stdout(io.StringIO()):
