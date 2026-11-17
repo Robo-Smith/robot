@@ -115,6 +115,8 @@ class Dashboard:
                                 raise ValueError('Robot is not ready for page controls')
                             if state.get('system_action', {}).get('busy') and data.get('action') != 'stop':
                                 raise ValueError('A system action is already running')
+                            if str(data.get('action', '')).startswith('dump_') and state.get('mode') not in ('manual', 'single'):
+                                raise ValueError('Dump buttons require manual or single-stick mode')
                             dashboard.actions.request(data.get('action'), state['connected'], data.get('confirmed'))
                             result = {'accepted': True}
                         elif path.endswith('/disable'):

@@ -174,7 +174,7 @@ class HttpTests(unittest.TestCase):
 
     def test_page_modes_require_confirmation_and_single_requires_controller(self):
         self.dashboard.update(teleop_ready=True)
-        for action in ('manual', 'wifi_off', 'single', 'follow'):
+        for action in ('wifi_off', 'single', 'follow'):
             with self.assertRaises(urllib.error.HTTPError) as error:
                 self.page_action(action)
             self.assertEqual(error.exception.code, 409)
@@ -213,3 +213,26 @@ class HttpTests(unittest.TestCase):
         with self.post('command', {'owner': owner, 'sequence': 2, 'x': 1, 'forward': 1}) as response:
             self.assertFalse(json.load(response)['accepted'])
         self.assertEqual(self.dashboard.teleop.outputs(), (0, 0, 0))
+
+    def test_manual_and_dump_work_without_controller(self):
+        self.dashboard.update(teleop_ready=True, connected=False)
+        with self.page_action('manual'):
+            pass
+        self.assertEqual(self.dashboard.actions.take(), 'manual')
+        self.dashboard.update(mode='manual')
+        with self.page_action('dump_up'):
+            pass
+        self.assertEqual(self.dashboard.actions.manual_dump(), 1)
+        with self.page_action('dump_stop'):
+            pass
+        self.assertEqual(self.dashboard.actions.manual_dump(), 0)
+
+    def test_network_toggles_need_confirmation_and_can_run_without_controller(self):
+        self.dashboard.update(teleop_ready=True, connected=False, mode='stop')
+        for action in ('wifi', 'hotspot'):
+            with self.assertRaises(urllib.error.HTTPError) as error:
+                self.page_action(action)
+            self.assertEqual(error.exception.code, 409)
+            with self.page_action(action, confirmed=True):
+                pass
+            self.assertEqual(self.dashboard.actions.take(), action)

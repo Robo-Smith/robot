@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=YardBot Screen
+Comment=Open the robot controls when a display is connected
+Exec=/usr/bin/python3 /home/rs/robot/screen_ui.py
+Path=/home/rs/robot
+Terminal=false
+X-GNOME-Autostart-enabled=true

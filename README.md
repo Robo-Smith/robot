@@ -953,3 +953,57 @@ To watch fallback logs as they arrive, add `-f` instead of `--no-pager`. These
 journal logs are separate from `/home/rs/robot.log`, which is the main robot
 program's output. Updated `hotspot.py` is picked up by the installed fallback
 service on the next reboot; no daemon reload or current network switch is needed.
+
+## Attached touchscreen
+
+`screen_ui.py` is a fullscreen native desktop client for the existing robot
+server. It opens when a DRM display connector reports connected, including a
+screen attached after login. Desktop autologin must be enabled in Pi OS for
+unattended startup. It offers Stop, Manual, Single stick, and a confirmed Follow
+selection. Single stick requires the Stadia controller. Manual opens without it for touchscreen dump controls; drive sticks require the controller. Mode changes
+use the same request queue and motor-loop checks as the web dashboard.
+
+When the robot reports Follow mode, regardless of whether it was selected on
+the controller, web dashboard, or touchscreen, the screen requests the shared
+`/camera.jpg` feed. This includes the existing OpenCV person boxes, confidence,
+and follow-target overlay. Camera failure and stale robot status replace the
+image with a message. Detaching the screen hides the UI without changing mode.
+Escape leaves fullscreen; closing the window does not stop the robot.
+
+Dependencies are the existing OpenCV/NumPy installation plus `python3-tk`.
+No browser or Pillow ImageTk package is needed. To install desktop autostart
+(the supplied entry assumes `/home/rs/robot`):
+
+```sh
+mkdir -p ~/.config/autostart
+cp /home/rs/robot/robot-screen.desktop ~/.config/autostart/
+```
+
+Log out and back in, or run `python3 /home/rs/robot/screen_ui.py` from the Pi
+desktop. The backend must run the updated `Pi.py` for touchscreen Manual
+selection. The screen retries while the robot server starts or restarts.
+`ROBOT_SCREEN_URL` overrides the default `http://127.0.0.1:8080` if the status
+server uses a different address or port. Display detection polls every two
+seconds. The camera feed updates at up to five frames per second.
+
+In Stop mode, the touchscreen also offers **Hotspot on/off**, **Wi-Fi on/off**,
+and **Shutdown**. Network buttons use the same toggles as D-pad left and right,
+with a confirmation dialog. The motor loop stops outputs before dispatching
+these actions. Controls disable while a system action is running, and its
+result appears below the screen controls. The local screen uses loopback, so
+switching Wi-Fi does not disconnect it from the robot backend.
+
+The touchscreen keeps a network indicator visible in every mode: **HOTSPOT
+ACTIVE**, **WI-FI OFF**, **Wi-Fi connected**, or **Wi-Fi on · Not connected**.
+It reads NetworkManager every two seconds in a separate thread; unavailable
+network information is explicitly shown as unknown. No network state is
+inferred from button presses, and no hotspot credentials are displayed.
+
+Follow mode uses the full touchscreen for its camera view, preserving the
+camera aspect ratio. Mode controls sit over the bottom of the image with gray
+see-through backgrounds; they remain tappable. The network indicator stays at
+the top. Selecting another mode restores its normal controls and layout.
+
+All touchscreen modes keep the mode-selection row along the bottom at the same
+position as the Follow overlay. Stop's network/shutdown controls and Manual's
+dump controls appear directly above that row.

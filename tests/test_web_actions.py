@@ -5,10 +5,10 @@ from web_actions import WebActions
 class PageActionTests(unittest.TestCase):
     def test_allowed_modes_and_excluded_actions(self):
         queue = WebActions()
-        for action in ('manual', 'wifi', 'wifi_off', 'wifi_on', 'reboot', 'unknown'):
+        for action in ('wifi_off', 'wifi_on', 'reboot', 'unknown'):
             with self.assertRaises(ValueError):
                 queue.request(action)
-        for action in ('stop', 'single', 'follow', 'hotspot', 'shutdown'):
+        for action in ('stop', 'manual', 'single', 'follow', 'hotspot', 'wifi', 'shutdown'):
             queue.request(action, controller_connected=True, confirmed=True, now=1)
             self.assertEqual(queue.take(now=1.1), action)
 
@@ -17,7 +17,7 @@ class PageActionTests(unittest.TestCase):
             WebActions().request('single')
 
     def test_deliberate_confirmation_required(self):
-        for action in ('follow', 'hotspot', 'shutdown'):
+        for action in ('follow', 'hotspot', 'wifi', 'shutdown'):
             with self.assertRaises(ValueError):
                 WebActions().request(action, confirmed=False)
 

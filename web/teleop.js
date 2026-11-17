@@ -4,7 +4,7 @@
   const knob = document.getElementById('knob');
   const message = document.getElementById('teleopMessage');
   const badge = document.getElementById('teleopState');
-  const dumpButtons = [[document.getElementById('dumpRaise'), 1], [document.getElementById('dumpLower'), -1]];
+  const dumpButtons = [[document.getElementById('dumpRaise'), -1], [document.getElementById('dumpLower'), 1]];
   const dumpHolds = new Map();
   let dump = 0;
   let owner = null, sequence = 0, x = 0, forward = 0, pointer = null;

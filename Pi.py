@@ -172,9 +172,9 @@ def main():
                         if page_action == 'follow':
                             mode = 'follow'
                             follower.set_enabled(True)
-                        elif page_action == 'single' and controller is not None:
-                            mode = 'single'
-                        elif page_action in ('hotspot', 'shutdown'):
+                        elif page_action == 'manual' or (page_action == 'single' and controller is not None):
+                            mode = page_action
+                        elif page_action in ('hotspot', 'wifi', 'shutdown'):
                             system_actions.submit(page_action)
                     action = holds.poll(time.monotonic())
                     if action and not system_actions.shutdown_pending.is_set():
@@ -203,6 +203,10 @@ def main():
                         get(evdev.ecodes.ABS_X), -get(evdev.ecodes.ABS_Y),
                         get(evdev.ecodes.ABS_Z), -get(evdev.ecodes.ABS_RZ),
                         get(evdev.ecodes.ABS_BRAKE), get(evdev.ecodes.ABS_GAS))
+                    if mode in ('manual', 'single') and not resyncing:
+                        screen_dump = dashboard.actions.manual_dump()
+                        if screen_dump:
+                            dump = screen_dump
                     if mode == 'teleop':
                         left, right, dump = web_outputs
                         follow_ramp.reset()
